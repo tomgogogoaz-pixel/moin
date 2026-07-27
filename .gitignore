@@ -1,0 +1,8 @@
+data/*.sqlite*
+data/uploads/
+data/generated/
+node_modules/
+.env
+coverage/
+tmp/
+*.log

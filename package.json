@@ -1,0 +1,15 @@
+{
+  "name": "moin",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Moin responsive DIY interior planning service",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}
