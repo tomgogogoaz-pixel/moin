@@ -1,5 +1,6 @@
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -1312,6 +1313,21 @@ export function createMoinServer(options = {}) {
   server.once('close', () => { if (!options.db) closeDatabase(db); });
   server.moin = { db, aiProvider, dataDir };
   return server;
+}
+
+let vercelServer;
+
+// Vercel can select this module as the Node function entrypoint while tracing
+// api/index.js. Keep a callable default export here as well as the named local
+// server factory, and create the server lazily so `npm start` does not open a
+// second database connection.
+export default function handleVercelRequest(req, res) {
+  if (!vercelServer) {
+    const dataDir = ENV.MOIN_DATA_DIR || path.join(os.tmpdir(), 'moin');
+    vercelServer = createMoinServer({ dataDir });
+  }
+  const requestListener = vercelServer.listeners('request')[0];
+  return requestListener(req, res);
 }
 
 const runtimeProcess = globalThis.process;
