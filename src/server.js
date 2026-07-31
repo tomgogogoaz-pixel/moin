@@ -23,6 +23,20 @@ const SESSION_DAYS = 14;
 const TERMS_VERSION = '2026-07-15-v1';
 // Three 8 MiB images expand to roughly 32 MiB when represented as Base64 JSON.
 const MAX_BODY_BYTES = 36 * 1024 * 1024;
+const MAX_ANALYSIS_IMAGE_BYTES = 24 * 1024 * 1024;
+const MAX_TARGET_MATERIALS = 12;
+const TARGET_MATERIAL_IDS = new Set([
+  'wall',
+  'floor',
+  'furniture',
+  'sink',
+  'countertop',
+  'tile',
+  'ceiling',
+  'door-window',
+  'decor',
+  'other'
+]);
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
@@ -193,6 +207,59 @@ function decodeImage(dataUrl) {
   return { mimeType: match[1], base64: match[2].replace(/\s/g, ''), buffer };
 }
 
+function inputError(message) {
+  return Object.assign(new Error(message), { status: 400 });
+}
+
+function decodeTargetMaterials(value) {
+  if (!Array.isArray(value) || !value.length || value.length > MAX_TARGET_MATERIALS) {
+    throw inputError(`대상별 자재 이미지는 1개 이상 ${MAX_TARGET_MATERIALS}개 이하로 입력해주세요.`);
+  }
+  const seen = new Set();
+  return value.map((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw inputError(`자재 ${index + 1}번 항목이 올바르지 않습니다.`);
+    }
+    const target = typeof item.target === 'string' ? item.target.trim() : '';
+    if (!TARGET_MATERIAL_IDS.has(target)) throw inputError(`자재 ${index + 1}번의 적용 대상이 올바르지 않습니다.`);
+    if (seen.has(target)) throw inputError('같은 대상에는 자재 이미지를 한 장만 연결할 수 있습니다.');
+    const image = decodeImage(item.image || item.dataUrl);
+    const mask = item.mask ? decodeImage(item.mask) : null;
+    const materialMask = item.materialMask ? decodeImage(item.materialMask) : null;
+    if (mask && mask.mimeType !== 'image/png') throw inputError('대상별 적용 영역 마스크는 PNG 형식이어야 합니다.');
+    if (materialMask && materialMask.mimeType !== 'image/png') throw inputError('자재 이미지 부분 선택 마스크는 PNG 형식이어야 합니다.');
+    return { target, image, mask, materialMask, selection: item.selection || null };
+  });
+}
+
+function validateTargetMaterialMasks(current, targetMaterials) {
+  if (!current || !Array.isArray(targetMaterials)) return;
+  const sourceDimensions = imageDimensions(current);
+  if (!sourceDimensions?.width || !sourceDimensions?.height) return;
+  for (const { image, mask, materialMask } of targetMaterials) {
+    if (mask) {
+      const maskDimensions = imageDimensions(mask);
+      if (!maskDimensions?.width || !maskDimensions?.height || maskDimensions.width !== sourceDimensions.width || maskDimensions.height !== sourceDimensions.height) {
+        throw inputError('각 대상의 적용 영역 마스크는 현재 공간 사진과 같은 크기여야 합니다.');
+      }
+    }
+    if (materialMask) {
+      const materialDimensions = imageDimensions(image);
+      const maskDimensions = imageDimensions(materialMask);
+      if (!materialDimensions?.width || !materialDimensions?.height || !maskDimensions?.width || !maskDimensions?.height || materialDimensions.width !== maskDimensions.width || materialDimensions.height !== maskDimensions.height) {
+        throw inputError('자재 이미지 부분 선택 마스크는 자재 이미지와 같은 크기여야 합니다.');
+      }
+    }
+  }
+}
+
+function validateAnalysisImageTotal(...images) {
+  const total = images.reduce((sum, image) => sum + (Buffer.isBuffer(image?.buffer) ? image.buffer.length : 0), 0);
+  if (total > MAX_ANALYSIS_IMAGE_BYTES) {
+    throw inputError('AI 분석에 사용하는 이미지의 총 용량은 24MB 이하여야 합니다.');
+  }
+}
+
 function writeImage(directory, image) {
   fs.mkdirSync(directory, { recursive: true });
   const extension = image.mimeType === 'image/png' ? '.png' : image.mimeType === 'image/webp' ? '.webp' : '.jpg';
@@ -229,6 +296,10 @@ function consumeHourlyLimit(usage, key, maximum) {
 function projectView(project) {
   if (!project) return null;
   let analysis = parseJson(project.analysis_json);
+  // Material assignment files are server-private bookkeeping used only for
+  // cleanup; never expose their absolute paths to the browser.
+  const { materialInputPaths: _materialInputPaths, ...publicAnalysis } = analysis;
+  analysis = publicAnalysis;
   const currentUrl = project.current_image_path
     ? `/api/v1/projects/${project.id}/media/current`
     : null;
@@ -303,6 +374,28 @@ const VERSION_MEDIA_FIELDS = Object.freeze([
 
 function versionMediaPaths(version) {
   return VERSION_MEDIA_FIELDS.map((field) => version?.[field]).filter(Boolean);
+}
+
+function publicAnalysisFailure(error, extra = {}) {
+  const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{1,79}$/.test(error.code)
+    ? error.code
+    : null;
+  const status = Number.isInteger(error?.status) ? error.status : null;
+  const detail = typeof error?.message === 'string' ? error.message.trim().slice(0, 240) : '';
+  return {
+    message: 'AI 분석을 완료하지 못했습니다.',
+    ...(code ? { code } : {}),
+    ...(status ? { status } : {}),
+    ...(detail ? { detail } : {}),
+    ...extra
+  };
+}
+
+function analysisMediaPaths(value) {
+  const analysis = parseJson(value);
+  return Array.isArray(analysis.materialInputPaths)
+    ? analysis.materialInputPaths.filter((filename) => typeof filename === 'string')
+    : [];
 }
 
 function projectVersionView(version, activeVersionId) {
@@ -657,7 +750,8 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
     }
     const body = await readJson(req);
     const objectMode = pathname === '/api/v1/generate/object-material';
-    const materialMode = !objectMode && (pathname === '/api/v1/generate' || [
+    const targetMaterialMode = pathname === '/api/v1/projects/analyze' && Object.hasOwn(body, 'materialAssignments');
+    const materialMode = !objectMode && !targetMaterialMode && (pathname === '/api/v1/generate' || [
       'spaceImage', 'floorMaterialImage', 'wallMaterialImage', 'floorImage', 'wallImage'
     ].some((key) => Object.hasOwn(body, key)));
     let current;
@@ -668,7 +762,15 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
     let objectMask = null;
     let targetObject = null;
     let selection = null;
-    if (objectMode) {
+    let targetMaterials = null;
+    if (targetMaterialMode) {
+      if (!body.currentImage) {
+        throw Object.assign(new Error('Current space image is required'), { status: 400 });
+      }
+      current = decodeImage(body.currentImage);
+      targetMaterials = decodeTargetMaterials(body.materialAssignments);
+      validateTargetMaterialMasks(current, targetMaterials);
+    } else if (objectMode) {
       const spaceImage = body.spaceImage || body.sourceImage || body.currentImage;
       const materialImage = body.materialImage || body.objectMaterialImage;
       const maskImage = body.maskImage;
@@ -705,6 +807,15 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
       current = decodeImage(body.currentImage);
       reference = decodeImage(body.referenceImage);
     }
+    validateAnalysisImageTotal(
+      current,
+      reference,
+      floorMaterial,
+      wallMaterial,
+      objectMaterial,
+      objectMask,
+      ...(targetMaterials || []).flatMap(({ image, mask, materialMask }) => [image, mask, materialMask])
+    );
     const uploadsDir = path.join(dataDir, 'uploads');
     const generatedDir = path.join(dataDir, 'generated');
     const currentPath = writeImage(uploadsDir, current);
@@ -713,15 +824,23 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
     const wallMaterialPath = wallMaterial ? writeImage(uploadsDir, wallMaterial) : null;
     const objectMaterialPath = objectMaterial ? writeImage(uploadsDir, objectMaterial) : null;
     const objectMaskPath = objectMask ? writeImage(uploadsDir, objectMask) : null;
+    const targetMaterialPaths = (targetMaterials || []).map(({ target, image, mask, materialMask }) => ({
+      target,
+      path: writeImage(uploadsDir, image),
+      maskPath: mask ? writeImage(uploadsDir, mask) : null,
+      materialMaskPath: materialMask ? writeImage(uploadsDir, materialMask) : null
+    }));
+    const materialInputPaths = targetMaterialPaths.flatMap(({ path: filename, maskPath, materialMaskPath }) => [filename, maskPath, materialMaskPath].filter(Boolean));
     const projectId = crypto.randomUUID();
     const now = new Date().toISOString();
+    const projectTitle = targetMaterialMode ? 'Target material application project' : objectMode ? `${targetObject} material application project` : materialMode ? 'Material inpainting project' : 'Space analysis project';
     db.prepare(`INSERT INTO projects
       (id, user_id, title, status, current_image_path, reference_image_path, floor_material_image_path, wall_material_image_path, object_material_image_path, object_mask_image_path, result_after_path, analysis_json, created_at, updated_at)
       VALUES (?, ?, ?, 'analyzing', ?, ?, ?, ?, ?, ?, NULL, '{}', ?, ?)`)
-      .run(projectId, user.id, objectMode ? `${targetObject} 재질 적용 프로젝트` : materialMode ? '자재 인페인팅 프로젝트' : '나의 거실 프로젝트', currentPath, referencePath, floorMaterialPath, wallMaterialPath, objectMaterialPath, objectMaskPath, now, now);
+      .run(projectId, user.id, projectTitle, currentPath, referencePath, floorMaterialPath, wallMaterialPath, objectMaterialPath, objectMaskPath, now, now);
     const baselineVersion = ensureBaselineProjectVersion(db, ownedProject(db, projectId, user.id));
     try {
-      const result = await aiProvider.analyze({ current, reference, floorMaterial, wallMaterial, objectMaterial, mask: objectMask, targetObject, selection });
+      const result = await aiProvider.analyze({ current, reference, floorMaterial, wallMaterial, objectMaterial, mask: objectMask, targetObject, selection, targetMaterials });
       if (!result || typeof result !== 'object') throw new Error('AI provider returned an invalid result');
       if (result.afterPublicUrl) throw new Error('AI provider returned the deprecated public-image result contract');
       let afterPath = null;
@@ -739,6 +858,15 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
       if (!afterPath) throw new Error('AI provider did not return an after image or an explicit source preview');
       const safeResult = { ...result };
       delete safeResult.after;
+      if (targetMaterialMode) {
+        safeResult.materialInputPaths = materialInputPaths;
+        safeResult.targetMaterials = targetMaterialPaths.map(({ target, maskPath, materialMaskPath }, index) => ({
+          target,
+          maskApplied: Boolean(maskPath),
+          materialMaskApplied: Boolean(materialMaskPath),
+          selection: targetMaterials[index]?.selection || null
+        }));
+      }
       db.prepare('UPDATE projects SET status = ?, result_after_path = ?, analysis_json = ?, updated_at = ? WHERE id = ?')
         .run('completed', afterPath, JSON.stringify(safeResult), new Date().toISOString(), projectId);
       createProjectVersion(db, {
@@ -755,9 +883,23 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
         analysis: safeResult
       });
       const project = ownedProject(db, projectId, user.id);
+      if (!project) {
+        throw Object.assign(new Error('분석 결과 프로젝트를 저장한 뒤 다시 읽지 못했습니다.'), {
+          status: 500,
+          code: 'PROJECT_PERSISTENCE_ERROR'
+        });
+      }
       sendJson(res, 201, { data: { project: projectView(project), next: `/reports/${projectId}` } });
     } catch (error) {
-      const failedAnalysis = { message: 'AI 분석을 완료하지 못했습니다.' };
+      const failedAnalysis = publicAnalysisFailure(error, targetMaterialMode ? {
+        materialInputPaths,
+        targetMaterials: targetMaterialPaths.map(({ target, maskPath, materialMaskPath }, index) => ({
+          target,
+          maskApplied: Boolean(maskPath),
+          materialMaskApplied: Boolean(materialMaskPath),
+          selection: targetMaterials[index]?.selection || null
+        }))
+      } : {});
       db.prepare('UPDATE projects SET status = ?, result_after_path = NULL, analysis_json = ?, updated_at = ? WHERE id = ?')
         .run('failed', JSON.stringify(failedAnalysis), new Date().toISOString(), projectId);
       createProjectVersion(db, {
@@ -775,6 +917,47 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
       });
       throw error;
     }
+    return true;
+  }
+
+  const replaceAfterMatch = pathname.match(/^\/api\/v1\/projects\/([^/]+)\/after$/);
+  if (replaceAfterMatch && method === 'POST') {
+    const user = requireUser(db, req, res);
+    if (!user) return true;
+    const project = ownedProject(db, replaceAfterMatch[1], user.id);
+    if (!project) { sendError(res, 404, 'PROJECT_NOT_FOUND', '프로젝트를 찾을 수 없습니다.'); return true; }
+    const body = await readJson(req);
+    if (!body.afterImage) throw inputError('보정할 시공 후 이미지가 필요합니다.');
+    const afterImage = decodeImage(body.afterImage);
+    const sourceImage = readStoredImage(project.current_image_path);
+    const sourceDimensions = imageDimensions(sourceImage);
+    const afterDimensions = imageDimensions(afterImage);
+    if (sourceDimensions?.width && sourceDimensions?.height && afterDimensions?.width && afterDimensions?.height
+      && (sourceDimensions.width !== afterDimensions.width || sourceDimensions.height !== afterDimensions.height)) {
+      throw inputError('보정된 시공 후 이미지는 원본 공간 사진과 같은 크기여야 합니다.');
+    }
+    const generatedDir = path.join(dataDir, 'generated');
+    const previousAfterPath = project.result_after_path;
+    const afterPath = writeImage(generatedDir, afterImage);
+    const analysis = parseJson(project.analysis_json);
+    const compositeAnalysis = {
+      ...analysis,
+      transformation: {
+        ...(analysis.transformation || {}),
+        geometryLocked: true,
+        maskLocked: true,
+        clientComposite: true
+      }
+    };
+    db.prepare('UPDATE projects SET result_after_path = ?, analysis_json = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+      .run(afterPath, JSON.stringify(compositeAnalysis), new Date().toISOString(), project.id, user.id);
+    const activeVersion = db.prepare("SELECT * FROM project_versions WHERE project_id = ? AND kind = 'generation' ORDER BY version_number DESC LIMIT 1").get(project.id);
+    if (activeVersion) {
+      db.prepare('UPDATE project_versions SET result_after_path = ?, analysis_json = ? WHERE id = ?')
+        .run(afterPath, JSON.stringify(compositeAnalysis), activeVersion.id);
+    }
+    removeUnreferencedProjectMedia(db, dataDir, [previousAfterPath]);
+    sendJson(res, 200, { data: { project: projectView(ownedProject(db, project.id, user.id)) } });
     return true;
   }
 
@@ -971,6 +1154,15 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
     return true;
   }
 
+  // Keep the collection action from being interpreted as a project id on a
+  // browser refresh or accidental GET. Without this guard, GET
+  // /api/v1/projects/analyze falls through to the `/:id` route and returns the
+  // misleading PROJECT_NOT_FOUND response for the literal id "analyze".
+  if (pathname === '/api/v1/projects/analyze' && method !== 'POST') {
+    sendError(res, 405, 'METHOD_NOT_ALLOWED', '분석 요청은 POST 방식으로만 호출할 수 있습니다.');
+    return true;
+  }
+
   const projectMatch = pathname.match(/^\/api\/v1\/projects\/([^/]+)$/);
   if (projectMatch && method === 'GET') {
     const user = requireUser(db, req, res);
@@ -991,9 +1183,9 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
       return true;
     }
 
-    const versionPaths = db.prepare('SELECT before_image_path, reference_image_path, floor_material_image_path, wall_material_image_path, object_material_image_path, object_mask_image_path, result_after_path FROM project_versions WHERE project_id = ?')
+    const versionPaths = db.prepare('SELECT before_image_path, reference_image_path, floor_material_image_path, wall_material_image_path, object_material_image_path, object_mask_image_path, result_after_path, analysis_json FROM project_versions WHERE project_id = ?')
       .all(project.id)
-      .flatMap(versionMediaPaths);
+      .flatMap((version) => [...versionMediaPaths(version), ...analysisMediaPaths(version.analysis_json)]);
     const mediaPaths = [
       project.current_image_path,
       project.reference_image_path,
@@ -1002,6 +1194,7 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
       project.object_material_image_path,
       project.object_mask_image_path,
       project.result_after_path,
+      ...analysisMediaPaths(project.analysis_json),
       ...versionPaths
     ];
     db.prepare('DELETE FROM projects WHERE id = ? AND user_id = ?').run(project.id, user.id);
@@ -1104,12 +1297,13 @@ export function createMoinServer(options = {}) {
     } catch (error) {
       if (!res.headersSent) {
         const status = error.status || 500;
-        const message = status >= 500 ? '요청을 처리하는 중 문제가 발생했습니다.' : error.message;
-        const code = status >= 500
+        const development = ENV.NODE_ENV !== 'production';
+        const message = status >= 500 && !development
+          ? '요청을 처리하는 중 문제가 발생했습니다.'
+          : (error.message || '요청을 처리하지 못했습니다.');
+        const code = status >= 500 && !development
           ? 'INTERNAL_ERROR'
-          : error.code === 'GEMINI_QUOTA_EXCEEDED'
-            ? 'GEMINI_QUOTA_EXCEEDED'
-            : 'BAD_REQUEST';
+          : error.code || (status >= 500 ? 'INTERNAL_ERROR' : 'BAD_REQUEST');
         sendError(res, status, code, message);
       } else res.end();
       if ((error.status || 500) >= 500) console.error(`[${requestId}]`, error);

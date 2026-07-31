@@ -4,12 +4,69 @@ const app = document.querySelector('#app');
 
 function createUploadState() {
   return {
-    mode: 'reference',
+    mode: 'materials',
     current: null,
     reference: null,
     material: null,
+    materialAssignments: [createMaterialAssignment('wall')],
     targetObject: 'sofa',
     selection: { x: 24, y: 22, width: 52, height: 54 }
+  };
+}
+
+const MATERIAL_TARGET_OPTIONS = Object.freeze([
+  Object.freeze({ id: 'wall', label: '벽' }),
+  Object.freeze({ id: 'floor', label: '바닥' }),
+  Object.freeze({ id: 'furniture', label: '가구' }),
+  Object.freeze({ id: 'sink', label: '싱크대' }),
+  Object.freeze({ id: 'countertop', label: '상판' }),
+  Object.freeze({ id: 'tile', label: '타일' }),
+  Object.freeze({ id: 'ceiling', label: '천장' }),
+  Object.freeze({ id: 'door-window', label: '문·샷시' }),
+  Object.freeze({ id: 'decor', label: '소품' }),
+  Object.freeze({ id: 'other', label: '기타' })
+]);
+
+const MATERIAL_TARGET_SELECTIONS = Object.freeze({
+  wall: { x: 4, y: 4, width: 92, height: 64 },
+  floor: { x: 2, y: 68, width: 96, height: 30 },
+  furniture: { x: 18, y: 30, width: 64, height: 52 },
+  sink: { x: 0, y: 34, width: 46, height: 42 },
+  countertop: { x: 0, y: 42, width: 56, height: 22 },
+  tile: { x: 0, y: 28, width: 70, height: 38 },
+  ceiling: { x: 4, y: 2, width: 92, height: 24 },
+  'door-window': { x: 4, y: 12, width: 36, height: 68 },
+  decor: { x: 20, y: 24, width: 60, height: 44 },
+  other: { x: 20, y: 20, width: 60, height: 60 }
+});
+
+function defaultMaterialSelection(target = 'other') {
+  return { ...(MATERIAL_TARGET_SELECTIONS[target] || MATERIAL_TARGET_SELECTIONS.other) };
+}
+
+function createMaterialAssignment(target = 'wall') {
+  return {
+    id: `material-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    target,
+    upload: null,
+    selection: defaultMaterialSelection(target),
+    maskStrokes: [],
+    maskPaths: [],
+    lassoDraft: null,
+    autoMask: null,
+    selectionMode: 'magic-wand',
+    wandTolerance: 18,
+    brushSize: 10,
+    materialMaskStrokes: [],
+    materialMaskPaths: [],
+    materialLassoDraft: null,
+    materialAutoMask: null,
+    materialSelectionMode: 'magic-wand',
+    materialWandTolerance: 18,
+    materialBrushSize: 10,
+    selectionHistory: [],
+    selectionHistoryIndex: -1,
+    activeSelection: null
   };
 }
 
@@ -27,6 +84,8 @@ const state = {
   mobileMenu: false,
   uploadOpen: false,
   analyzing: false,
+  analysisError: null,
+  analysisPhase: null,
   upload: createUploadState(),
   materials: [],
   cart: [],
@@ -39,6 +98,8 @@ const state = {
   dialog: null,
   focusReturnSelector: null
 };
+
+const imagePixelCache = new Map();
 
 const money = new Intl.NumberFormat('ko-KR');
 const protectedRoutes = ['/dashboard', '/projects', '/estimate', '/mypage', '/market', '/reports', '/notifications'];
@@ -63,6 +124,8 @@ const fallbackEstimate = {
 function resetUserState() {
   state.uploadOpen = false;
   state.analyzing = false;
+  state.analysisError = null;
+  state.analysisPhase = null;
   state.upload = createUploadState();
   state.cart = [];
   state.projects = [];
@@ -123,19 +186,34 @@ function brandLogo() {
 }
 
 async function api(url, options = {}) {
-  const response = await fetch(url, {
-    credentials: 'same-origin',
-    ...options,
-    headers: { ...(options.body ? { 'content-type': 'application/json' } : {}), ...(options.headers || {}) }
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = new Error(payload.error?.message || '요청을 처리하지 못했습니다.');
-    error.status = response.status;
-    error.details = payload.error;
+  const isAiRequest = /\/api\/v1\/(projects\/analyze|generate)/.test(url);
+  const controller = options.signal ? null : isAiRequest ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), 180000) : null;
+  try {
+    const response = await fetch(url, {
+      credentials: 'same-origin',
+      ...options,
+      ...(controller ? { signal: controller.signal } : {}),
+      headers: { ...(options.body ? { 'content-type': 'application/json' } : {}), ...(options.headers || {}) }
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(payload.error?.message || '요청을 처리하지 못했습니다.');
+      error.status = response.status;
+      error.details = payload.error;
+      throw error;
+    }
+    return payload.data;
+  } catch (error) {
+    if (controller?.signal.aborted) {
+      const timeoutError = new Error('AI 요청 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.');
+      timeoutError.status = 408;
+      throw timeoutError;
+    }
     throw error;
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
-  return payload.data;
 }
 
 function notify(message) {
@@ -206,7 +284,7 @@ function desktopHeader(active = 'myproject') {
     ${houseLogo()}
     <div style='display:flex;align-items:center'>
       <nav class='app-nav' aria-label='주 메뉴'>${AUTHENTICATED_NAV.map(({ href, key, label }) => `<a href='${href}' data-link class='${active === key ? 'active' : ''}' ${active === key ? `aria-current='page'` : ''}>${label}</a>`).join('')}</nav>
-      <div class='app-actions'>${notificationCenterLink()}<a class='avatar avatar-link' href='/mypage' data-link aria-label='마이페이지로 이동' title='마이페이지'>${escapeHtml((state.user?.name || 'M').slice(0,1))}</a></div>
+      <div class='app-actions'>${notificationCenterLink()}<a class='avatar avatar-link' href='/mypage' data-link aria-label='마이페이지로 이동' title='마이페이지'>${escapeHtml((state.user?.name || 'M').slice(0,1))}</a><button class='icon-button header-logout' type='button' data-action='logout' aria-label='로그아웃' title='로그아웃'>${icon('logout', 'house-mark')}</button></div>
     </div>
   </div></header>`;
 }
@@ -219,7 +297,7 @@ function mobileHeader({ back = false, house = false, profile = false } = {}) {
       : `<a class='wordmark compact' href='/dashboard' data-link>Moin</a>`;
   const avatar = `<a class='avatar avatar-link' href='/mypage' data-link aria-label='마이페이지로 이동' title='마이페이지'>${escapeHtml((state.user?.name || 'M').slice(0,1))}</a>`;
   const menu = profile ? '' : `<button class='icon-button' data-action='mobile-app-menu' aria-label='메뉴' aria-expanded='${state.mobileMenu}'>${icon('menu', 'house-mark')}</button>`;
-  return `<header class='mobile-app-header'>${brand}<div class='mobile-app-actions'>${notificationCenterLink()}${avatar}${menu}</div></header>${state.mobileMenu && !profile ? `<nav class='mobile-app-menu' aria-label='모바일 메뉴'><a href='/dashboard' data-link>홈</a><a href='/projects' data-link>내 프로젝트</a><a href='/estimate' data-link>견적서</a><a href='/notifications' data-link>알림</a><a href='/mypage' data-link>마이페이지</a></nav>` : ''}`;
+  return `<header class='mobile-app-header'>${brand}<div class='mobile-app-actions'>${notificationCenterLink()}${avatar}${menu}</div></header>${state.mobileMenu && !profile ? `<nav class='mobile-app-menu' aria-label='모바일 메뉴'><a href='/dashboard' data-link>홈</a><a href='/projects' data-link>내 프로젝트</a><a href='/estimate' data-link>견적서</a><a href='/notifications' data-link>알림</a><a href='/mypage' data-link>마이페이지</a><button type='button' data-action='logout'>로그아웃</button></nav>` : ''}`;
 }
 
 function bottomNav(active = 'home') {
@@ -248,8 +326,9 @@ function serviceCards({ signedIn = false } = {}) {
 }
 
 function serviceSection({ signedIn = false } = {}) {
+  const ctaAction = signedIn ? 'open-upload' : 'start';
   return `<section class='landing-section' id='service'><div class='landing-section-inner'>
-    <div class='landing-section-heading'><span class='landing-eyebrow'>Moin service</span><h2>공간의 모든 선택을<br>더 쉽고 투명하게.</h2><p>공간 분석부터 견적, 변화의 기록까지 필요한 흐름을 한곳에서 자연스럽게 이어보세요.</p></div>
+    <div class='landing-section-heading-row'><div class='landing-section-heading'><span class='landing-eyebrow'>Moin service</span><h2>공간의 모든 선택을<br>더 쉽고 투명하게.</h2><p>공간 분석부터 견적, 변화의 기록까지 필요한 흐름을 한곳에서 자연스럽게 이어보세요.</p></div><button type='button' class='button service-section-cta' data-action='${ctaAction}'>프로젝트 시작하기 ${icon('arrow','tool-drawing')}</button></div>
     ${serviceCards({ signedIn })}
   </div></section>`;
 }
@@ -271,7 +350,7 @@ function renderLanding() {
     ${state.mobileMenu ? `<nav class='mobile-menu' aria-label='모바일 주 메뉴'>${mobilePublicNavigation}</nav>` : ''}
     <section class='landing-hero' aria-labelledby='hero-title'>
       ${mainHeroVideo()}
-      <div class='hero-copy'><h1 id='hero-title'><span class='hero-title-kicker'>사진 두 장에서 시작되는</span><span class='hero-title-main'>솔직하고 투명한<br>공간의 기록</span></h1><button type='button' class='button hero-cta' data-action='start' aria-label='무료 체험 시작하기'><span class='hero-cta-copy'><span class='hero-cta-title'>Start</span><span class='hero-cta-subtitle'>무료 체험 시작하기</span></span><span class='hero-cta-arrow' aria-hidden='true'>→</span></button></div>
+      <div class='hero-copy'><h1 id='hero-title'><span class='hero-title-kicker'>사진 두 장에서 시작되는</span><span class='hero-title-main'>솔직하고 투명한<br>공간의 기록</span></h1><button type='button' class='button hero-cta' data-action='start' aria-label='무료 체험 시작하기'><span class='hero-cta-copy'><span class='hero-cta-title'>Start</span></span><span class='hero-cta-arrow' aria-hidden='true'>→</span></button></div>
     </section>
     ${serviceSection()}
   </main>`;
@@ -304,7 +383,7 @@ function renderLogin() {
       <button class='social-button kakao' data-action='social' data-provider='카카오'><span class='social-logo'>●</span>카카오로 로그인</button>
       <button class='social-button' data-action='social' data-provider='Apple'><span class='social-logo'>●</span>Apple로 로그인</button>
     </div>
-    <p class='auth-switch'>계정이 없으신가요?<a href='/signup' data-link>회원가입</a></p><p class='auth-switch' style='margin-top:12px'><button class='button ghost mint' data-action='demo-login' style='min-height:auto;padding:0;font-size:12px'>테스트 계정으로 둘러보기</button></p>
+    <p class='auth-switch'>계정이 없으신가요?<a href='/signup' data-link>회원가입</a></p>
   </section></div>${authTrust()}</main>`;
 }
 
@@ -464,6 +543,46 @@ function objectTargetLabel(targetObject) {
   return OBJECT_TARGETS.find((target) => target.id === targetObject)?.label || '기타 영역';
 }
 
+function analysisErrorMessage(error) {
+  const message = String(error?.message || '').trim();
+  if (error?.status === 429 || /할당량|quota|rate limit/i.test(message)) {
+    return 'Gemini 사용량 한도에 도달했습니다. 잠시 후 다시 시도하거나 Google AI Studio의 할당량을 확인해주세요.';
+  }
+  if (error?.status === 503 || /\b503\b|혼잡|overloaded|high demand/i.test(message)) {
+    return 'Gemini 이미지 생성 서버가 혼잡합니다. 잠시 후 다시 시도해주세요.';
+  }
+  if (/fetch failed|network|failed to fetch|timeout|aborted/i.test(message)) {
+    return 'Gemini 서버에 연결하지 못했습니다. 인터넷 연결과 API 키 설정을 확인한 뒤 다시 시도해주세요.';
+  }
+  if (error?.status === 413) return '업로드한 이미지 용량이 너무 큽니다. 이미지 크기나 개수를 줄여주세요.';
+  return message || '최종 결과를 생성하지 못했습니다. 입력 이미지를 확인하고 다시 시도해주세요.';
+}
+
+function assertGeneratedProject(data) {
+  const project = data?.project;
+  const afterUrl = String(project?.afterUrl || '');
+  const isFallbackImage = afterUrl.endsWith('/assets/generated/room-before.webp');
+  if (!project?.id || project.status !== 'completed' || !afterUrl || isFallbackImage) {
+    const error = new Error('생성된 결과 이미지가 없어 리포트를 열 수 없습니다. Gemini 응답을 확인한 후 다시 시도해주세요.');
+    error.status = 502;
+    throw error;
+  }
+  return data;
+}
+
+function updateAnalysisProgress(message) {
+  const progress = document.querySelector('.analysis-progress');
+  if (progress) progress.textContent = message;
+}
+
+function revealAnalysisError() {
+  requestAnimationFrame(() => document.querySelector('.analysis-error')?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+}
+
+function materialTargetLabel(target) {
+  return MATERIAL_TARGET_OPTIONS.find((option) => option.id === target)?.label || '기타';
+}
+
 function objectSelectionPanel() {
   const current = state.upload.current;
   const selection = clampObjectSelection(state.upload.selection);
@@ -502,7 +621,143 @@ function objectSelectionRange(field, label, value, max) {
   return `<label class='object-selection-control'><span>${label}</span><input type='range' min='${minimum}' max='${limit}' step='1' value='${Math.min(Math.max(Math.round(value), minimum), limit)}' data-object-selection-field='${field}' aria-valuetext='${Math.round(value)}%'><b data-object-selection-value='${field}'>${Math.round(value)}%</b></label>`;
 }
 
+function findMaterialAssignment(id) {
+  return state.upload.materialAssignments.find((item) => item.id === id) || null;
+}
+
+function materialAssignmentsReady() {
+  return Boolean(state.upload.current && state.upload.materialAssignments.length && state.upload.materialAssignments.every((item) => item.upload));
+}
+
+function materialAssignmentSelectionMarkup(item, index) {
+  if (!state.upload.current) return `<p class='material-assignment-selection-empty'>공간 사진을 먼저 올리면 화살표가 가리키는 적용 영역을 지정할 수 있어요.</p>`;
+  const selection = clampObjectSelection(item.selection);
+  const hasSelection = Boolean(item.autoMask || (Array.isArray(item.maskStrokes) && item.maskStrokes.length) || (Array.isArray(item.maskPaths) && item.maskPaths.length));
+  return materialAssignmentSelectionFreehandMarkup(item, index, selection, hasSelection);
+}
+
+function materialAssignmentSelectionFreehandMarkup(item, index, selection, hasFreehand) {
+  const title = `\uc790\uc7ac ${index + 1}`;
+  const target = materialTargetLabel(item.target);
+  const strokes = Array.isArray(item.maskStrokes) ? item.maskStrokes.length : 0;
+  const paths = Array.isArray(item.maskPaths) ? item.maskPaths.length : 0;
+  const output = item.autoMask
+    ? `\ub9c8\uc220\ubd09 \uc790\ub3d9 \uc120\ud0dd: \uc801\uc6a9 \uc601\uc5ed \ud1b5\ud569`
+    : paths
+    ? '\ub2e4\uac01\ud615 \uc62c\uac00\ubbf8 \uc120\ud0dd: ' + paths + '\uac1c \uc601\uc5ed'
+    : strokes
+    ? `\uc790\uc720 \uc120\ud0dd: ${strokes}\ud68d`
+    : `\uc0ac\uac01\ud615 \uc120\ud0dd: \uc67c\ucabd ${Math.round(selection.x)}%, \uc704 ${Math.round(selection.y)}%, \uac00\ub85c ${Math.round(selection.width)}%, \uc138\ub85c ${Math.round(selection.height)}%`;
+  return `<div class='material-assignment-selection${hasFreehand ? ' has-selection' : ''}' data-material-selection-root='${item.id}' style='--selection-x:${selection.x}%;--selection-y:${selection.y}%;--selection-width:${selection.width}%;--selection-height:${selection.height}%'>
+    <div class='material-assignment-selection-heading'><strong>${title} \uc801\uc6a9 \uc601\uc5ed</strong><span>${target} \ubd80\ubd84\uc744 \ub9c8\uc220\ubd09\uc73c\ub85c \ud074\ub9ad\ud558\uac70\ub098 \ube0c\ub7ec\uc26c/\uc62c\uac00\ubbf8\ub85c \uc9c1\uc811 \uc120\ud0dd</span></div>
+    <small class='material-selection-hint'>Shift/Ctrl + \ud074\ub9ad\u00b7\ub4dc\ub798\uadf8: \uc601\uc5ed \ucd94\uac00 \u00b7 \uc120\ud0dd\ub41c \uacf3 \ub2e4\uc2dc \ud074\ub9ad: \ud574\uc81c \u00b7 Alt + \ud074\ub9ad\u00b7\ub4dc\ub798\uadf8: \uc81c\uc678 \u00b7 \ub9c8\uc220\ubd09\uc740 \uc778\uc811 \uc601\uc5ed\ub9cc \uc120\ud0dd \u00b7 \ub2e4\uac01\ud615 \uc62c\uac00\ubbf8: \uc810 \uc5f0\uacb0 \ud6c4 \ub354\ube14\ud074\ub9ad/\uc5d4\ud130\ub85c \ub2eb\uae30 (\uccab \uc810 \uadfc\ucc98\uc5d0 \uc624\uba74 \ucd08\ub85d\uc0c9 \ub2eb\uae30 \ud45c\uc2dc)</small>
+    <div class='material-assignment-selection-stage' data-material-selection-stage='${item.id}'>
+      <img src='${state.upload.current.dataUrl}' alt='${title} \uc801\uc6a9 \uc601\uc5ed\uc744 \ub9c8\uc6b0\uc2a4\ub85c \uc120\ud0dd\ud560 \ud604\uc7ac \uacf5\uac04 \uc0ac\uc9c4'>
+      <canvas class='material-selection-canvas' data-material-selection-canvas='${item.id}' aria-label='${title} \uc790\uc7ac \uc801\uc6a9 \uc601\uc5ed \ub9c8\uc6b0\uc2a4 \uc120\ud0dd'></canvas>
+      <div class='material-assignment-selection-box' aria-hidden='true'><span>${target}</span></div>
+    </div>
+    <div class='material-selection-tools'>
+      <label class='material-selection-mode'><span>\uc120\ud0dd \ubc29\uc2dd</span><select data-material-selection-mode='${item.id}' aria-label='${title} \uc120\ud0dd \ubc29\uc2dd'><option value='magic-wand' ${item.selectionMode === 'magic-wand' ? 'selected' : ''}>\ub9c8\uc220\ubd09 \uc778\uc811 \uc601\uc5ed</option><option value='freehand' ${item.selectionMode === 'freehand' ? 'selected' : ''}>\ube0c\ub7ec\uc26c \uc790\uc720 \uc120\ud0dd</option><option value='lasso' ${item.selectionMode === 'lasso' ? 'selected' : ''}>\ub2e4\uac01\ud615 \uc62c\uac00\ubbf8 (\uc810 \uc5f0\uacb0)</option></select></label>
+      <label class='material-wand-control'><span>\ud1a8\ub7ec\ub7f0\uc2a4</span><input type='range' min='5' max='80' step='1' value='${Math.round(item.wandTolerance || 18)}' data-material-wand-tolerance='${item.id}' aria-label='${title} \ub9c8\uc220\ubd09 \ud1a8\ub7ec\ub7f0\uc2a4'><b data-material-wand-value='${item.id}'>${Math.round(item.wandTolerance || 18)}</b></label>
+      <label class='material-brush-control'><span>\ube0c\ub7ec\uc26c \ud06c\uae30</span><input type='range' min='4' max='24' step='1' value='${Math.round(item.brushSize || 10)}' data-material-brush-size='${item.id}' aria-label='${title} \ube0c\ub7ec\uc26c \ud06c\uae30'><b data-material-brush-value='${item.id}'>${Math.round(item.brushSize || 10)}</b></label>
+      <span class='material-history-tools'><button type='button' class='icon-button material-history-button' data-action='undo-material-selection' data-id='${item.id}' aria-label='${title} \uc120\ud0dd \uc2e4\ud589 \ucde8\uc18c' title='Ctrl+Z'>↶</button><button type='button' class='icon-button material-history-button' data-action='redo-material-selection' data-id='${item.id}' aria-label='${title} \uc120\ud0dd \ub2e4\uc2dc \uc2e4\ud589' title='Ctrl+Shift+Z'>↷</button></span>
+      <button type='button' class='button ghost material-selection-reset' data-action='reset-material-selection' data-id='${item.id}' aria-label='\uc804\uccb4 \uc120\ud0dd \uc9c0\uc6b0\uae30'>\uc804\uccb4 \uc120\ud0dd \uc9c0\uc6b0\uae30</button>
+    </div>
+    <div class='material-assignment-selection-controls' aria-label='${title} \uc0ac\uac01\ud615 \uc120\ud0dd \ubcf4\uc870 \uc870\uc815'>
+      <label><span>\uac00\ub85c \uc704\uce58</span><input type='range' min='0' max='92' step='1' value='${Math.round(selection.x)}' data-material-selection-id='${item.id}' data-material-selection-field='x' aria-label='${title} \uac00\ub85c \uc704\uce58'></label>
+      <label><span>\uc138\ub85c \uc704\uce58</span><input type='range' min='0' max='92' step='1' value='${Math.round(selection.y)}' data-material-selection-id='${item.id}' data-material-selection-field='y' aria-label='${title} \uc138\ub85c \uc704\uce58'></label>
+      <label><span>\uac00\ub85c \ud06c\uae30</span><input type='range' min='8' max='100' step='1' value='${Math.round(selection.width)}' data-material-selection-id='${item.id}' data-material-selection-field='width' aria-label='${title} \uac00\ub85c \ud06c\uae30'></label>
+      <label><span>\uc138\ub85c \ud06c\uae30</span><input type='range' min='8' max='100' step='1' value='${Math.round(selection.height)}' data-material-selection-id='${item.id}' data-material-selection-field='height' aria-label='${title} \uc138\ub85c \ud06c\uae30'></label>
+    </div>
+    <output data-material-selection-output='${item.id}'>${output}</output>
+  </div>`;
+}
+
+function materialSwatchSelectionMarkup(item, index) {
+  if (!item.upload) return '';
+  const title = `\uc790\uc7ac ${index + 1}`;
+  const strokes = Array.isArray(item.materialMaskStrokes) ? item.materialMaskStrokes.length : 0;
+  const paths = Array.isArray(item.materialMaskPaths) ? item.materialMaskPaths.length : 0;
+  const hasSelection = Boolean(item.materialAutoMask || strokes || (Array.isArray(item.materialMaskPaths) && item.materialMaskPaths.length));
+  const output = item.materialAutoMask
+    ? `\ub9c8\uc220\ubd09 \uc790\ub3d9 \uc120\ud0dd: \uc790\uc7ac \uc601\uc5ed \ud1b5\ud569`
+    : paths
+    ? '\ub2e4\uac01\ud615 \uc62c\uac00\ubbf8 \uc120\ud0dd: ' + paths + '\uac1c \uc601\uc5ed'
+    : strokes
+    ? `\uc790\uc720 \uc120\ud0dd: ${strokes}\ud68d`
+    : '\uc790\uc7ac \uc804\uccb4\ub97c \uc0ac\uc6a9';
+  return `<div class='material-swatch-selection${hasSelection ? ' has-selection' : ''}' data-material-swatch-root='${item.id}'>
+    <div class='material-assignment-selection-heading'><strong>${title} \uc790\uc7ac \ud30c\ud2b8 \uc120\ud0dd</strong><span>\uc801\uc6a9\ud560 \uc790\uc7ac \uc0ac\uc9c4 \ub0b4\uc5d0\uc11c \uc0ac\uc6a9\ud560 \ubd80\ubd84\uc744 \ub9c8\uc220\ubd09/\ube0c\ub7ec\uc26c/\uc62c\uac00\ubbf8\ub85c \uc120\ud0dd</span></div>
+    <small class='material-selection-hint'>Shift/Ctrl + \ud074\ub9ad\u00b7\ub4dc\ub798\uadf8: \uc601\uc5ed \ucd94\uac00 \u00b7 \uc120\ud0dd\ub41c \uacf3 \ub2e4\uc2dc \ud074\ub9ad: \ud574\uc81c \u00b7 Alt + \ud074\ub9ad\u00b7\ub4dc\ub798\uadf8: \uc81c\uc678 \u00b7 \ub2e4\uac01\ud615 \uc62c\uac00\ubbf8: \uc810 \uc5f0\uacb0 \ud6c4 \ub354\ube14\ud074\ub9ad/\uc5d4\ud130\ub85c \ub2eb\uae30 (\uccab \uc810 \uadfc\ucc98\uc5d0 \uc624\uba74 \ucd08\ub85d\uc0c9 \ub2eb\uae30 \ud45c\uc2dc)</small>
+    <div class='material-assignment-selection-stage' data-material-swatch-stage='${item.id}'>
+      <img src='${item.upload.dataUrl}' alt='${title} \uc790\uc7ac \uc0ac\uc9c4 \uc120\ud0dd \uc601\uc5ed'>
+      <canvas class='material-selection-canvas material-swatch-selection-canvas' data-material-swatch-canvas='${item.id}' aria-label='${title} \uc790\uc7ac \uc0ac\uc9c4 \ubd80\ubd84 \uc120\ud0dd'></canvas>
+    </div>
+    <div class='material-selection-tools'>
+      <label class='material-selection-mode'><span>\uc120\ud0dd \ubc29\uc2dd</span><select data-material-swatch-mode='${item.id}' aria-label='${title} \uc790\uc7ac \uc120\ud0dd \ubc29\uc2dd'><option value='magic-wand' ${item.materialSelectionMode === 'magic-wand' ? 'selected' : ''}>\ub9c8\uc220\ubd09 \uc778\uc811 \uc601\uc5ed</option><option value='freehand' ${item.materialSelectionMode === 'freehand' ? 'selected' : ''}>\ube0c\ub7ec\uc26c \uc790\uc720 \uc120\ud0dd</option><option value='lasso' ${item.materialSelectionMode === 'lasso' ? 'selected' : ''}>\ub2e4\uac01\ud615 \uc62c\uac00\ubbf8 (\uc810 \uc5f0\uacb0)</option></select></label>
+      <label class='material-wand-control'><span>\ud1a8\ub7ec\ub7f0\uc2a4</span><input type='range' min='5' max='80' step='1' value='${Math.round(item.materialWandTolerance || 18)}' data-material-swatch-tolerance='${item.id}' aria-label='${title} \uc790\uc7ac \ub9c8\uc220\ubd09 \ud1a8\ub7ec\ub7f0\uc2a4'><b data-material-swatch-tolerance-value='${item.id}'>${Math.round(item.materialWandTolerance || 18)}</b></label>
+      <label class='material-brush-control'><span>\ube0c\ub7ec\uc26c \ud06c\uae30</span><input type='range' min='4' max='24' step='1' value='${Math.round(item.materialBrushSize || 10)}' data-material-swatch-brush-size='${item.id}' aria-label='${title} \uc790\uc7ac \ube0c\ub7ec\uc26c \ud06c\uae30'><b data-material-swatch-brush-value='${item.id}'>${Math.round(item.materialBrushSize || 10)}</b></label>
+      <span class='material-history-tools'><button type='button' class='icon-button material-history-button' data-action='undo-material-selection' data-id='${item.id}' aria-label='${title} \uc790\uc7ac \uc120\ud0dd \uc2e4\ud589 \ucde8\uc18c' title='Ctrl+Z'>↶</button><button type='button' class='icon-button material-history-button' data-action='redo-material-selection' data-id='${item.id}' aria-label='${title} \uc790\uc7ac \uc120\ud0dd \ub2e4\uc2dc \uc2e4\ud589' title='Ctrl+Shift+Z'>↷</button></span>
+      <button type='button' class='button ghost material-selection-reset' data-action='reset-material-swatch-selection' data-id='${item.id}' aria-label='\uc804\uccb4 \uc790\uc7ac \uc120\ud0dd \uc9c0\uc6b0\uae30'>\uc804\uccb4 \uc790\uc7ac \uc120\ud0dd \uc9c0\uc6b0\uae30</button>
+    </div>
+    <output data-material-swatch-output='${item.id}'>${output}</output>
+  </div>`;
+}
+
+function materialAssignmentRow(item, index) {
+  const title = `자재 ${index + 1}`;
+  return `<div class='material-assignment-row' data-material-assignment='${item.id}'>
+    <div class='material-assignment-controls'>
+      <label><span>적용 대상</span><select data-material-target='${item.id}' aria-label='${title} 적용 대상'>${MATERIAL_TARGET_OPTIONS.map((option) => `<option value='${option.id}' ${option.id === item.target ? 'selected' : ''}>${option.label}</option>`).join('')}</select></label>
+      ${state.upload.materialAssignments.length > 1 ? `<button type='button' class='icon-button material-remove' data-action='remove-material-assignment' data-id='${item.id}' aria-label='${title} 삭제'>${icon('close','tool-drawing')}</button>` : ''}
+    </div>
+    <label class='material-assignment-upload' data-material-drop='${item.id}'>
+      <input type='file' data-material-upload='${item.id}' accept='image/png,image/jpeg,image/webp' aria-label='${title} 이미지 업로드'>
+      ${item.upload ? `<span class='upload-preview'><img src='${item.upload.dataUrl}' alt='${title} 미리보기'><span>${item.upload.originalName || item.upload.name}</span></span>` : `<span class='upload-empty'><span class='upload-icon'>${icon('image','tool-drawing')}</span><strong>${title} 이미지 선택</strong><span>이 대상에 적용할 재질·색상 이미지 1장</span></span>`}
+    </label>
+    ${materialSwatchSelectionMarkup(item, index)}
+    ${materialAssignmentSelectionMarkup(item, index)}
+  </div>`;
+}
+
+function materialAssignmentsPanel() {
+  return `<section class='material-assignments-panel' aria-labelledby='material-assignments-title'>
+    <div class='material-assignments-heading'><div><h3 id='material-assignments-title'>대상별 자재 이미지</h3><p>벽, 바닥, 가구, 싱크대 등 바꿀 대상마다 이미지를 한 장씩 연결하세요.</p></div><span class='material-assignment-count'>${state.upload.materialAssignments.length}/12</span></div>
+    <div class='material-assignment-list'>${state.upload.materialAssignments.map(materialAssignmentRow).join('')}</div>
+    ${state.upload.materialAssignments.length < 12 ? `<button type='button' class='button ghost material-add' data-action='add-material-assignment'>+ 적용 대상 추가</button>` : ''}
+    <p class='material-final-note'>원본 공간의 구도와 배치는 유지하고, 최종 결과 이미지 1장만 생성합니다.</p>
+  </section>`;
+}
+
 function uploadModal() {
+  if (!state.uploadOpen) return '';
+  const materialMode = state.upload.mode === 'materials';
+  const objectMode = state.upload.mode === 'object';
+  const ready = materialMode
+    ? materialAssignmentsReady()
+    : objectMode ? Boolean(state.upload.current && state.upload.material) : Boolean(state.upload.current && state.upload.reference);
+  const action = materialMode ? 'material-assignments-analyze' : objectMode ? 'object-material-analyze' : 'analyze';
+  const buttonText = state.analyzing
+    ? `<span class='spinner'></span> 최종 결과를 생성하고 있습니다`
+    : materialMode ? '최종 결과 생성' : objectMode ? '선택 영역에 자재 적용' : 'AI 분석 시작';
+  const analysisStatus = state.analyzing
+    ? `<p class='analysis-progress' role='status'>${state.analysisPhase === 'preparing' ? '선택 영역 마스크를 준비하고 있습니다.' : '이미지와 선택 마스크를 Gemini에 전송하고 있습니다. 입력 크기에 따라 최대 3분 정도 걸릴 수 있어요.'}</p>`
+    : state.analysisError
+    ? `<div class='analysis-error' role='alert'><strong>최종 결과를 만들지 못했습니다.</strong><span>${escapeHtml(state.analysisError)}</span><small>입력 이미지는 유지되어 있으니 수정 후 다시 시도할 수 있어요.</small></div>`
+    : '';
+  return `<div class='modal-backdrop' data-action='backdrop-close'><section class='upload-modal' role='dialog' aria-modal='true' aria-labelledby='upload-title' data-modal>
+    <div class='modal-handle'></div><button class='icon-button modal-close' data-action='close-upload' aria-label='닫기'>${icon('close','tool-drawing')}</button><h2 id='upload-title'>공간 이미지 업로드</h2>
+    <fieldset class='upload-mode-toggle'><legend class='sr-only'>AI 시뮬레이션 방식</legend><div class='upload-mode-options'><label class='upload-mode-option'><input type='radio' name='upload-mode' value='materials' data-upload-mode ${materialMode ? 'checked' : ''}><span>대상별 자재 적용</span></label><label class='upload-mode-option'><input type='radio' name='upload-mode' value='reference' data-upload-mode ${!materialMode && !objectMode ? 'checked' : ''}><span>공간 전체 스타일</span></label><label class='upload-mode-option'><input type='radio' name='upload-mode' value='object' data-upload-mode ${objectMode ? 'checked' : ''}><span>객체별 재질 적용</span></label></div></fieldset>
+    <p class='upload-intro'>${materialMode ? '현재 공간 사진 1장과 바꿀 대상별 자재 이미지를 업로드하세요.' : objectMode ? '공간 사진과 자재 사진을 올린 뒤 바꿀 영역을 지정하세요.' : '현재 공간 사진과 스타일 참고 이미지를 업로드하세요.'}</p>
+    <div class='upload-zones'>${uploadZone('current','현재 공간 사진','공간 사진 1장')}${materialMode ? '' : objectMode ? uploadZone('material','적용할 자재 이미지','재질·색상 이미지 1장') : uploadZone('reference','스타일 참고 이미지','스타일 참고 이미지 1장')}</div>
+    ${materialMode ? materialAssignmentsPanel() : ''}
+    ${objectMode ? objectSelectionPanel() : ''}
+    <button class='button primary analyze-button ${ready ? '' : 'hidden'}' data-action='${action}' ${state.analyzing ? 'disabled' : ''}>${buttonText}</button>
+    ${analysisStatus}
+  </section></div>`;
+}
+
+function legacyUploadModal() {
   if (!state.uploadOpen) return '';
   const objectMode = state.upload.mode === 'object';
   const ready = objectMode
@@ -519,14 +774,13 @@ function uploadModal() {
     <div class='upload-zones'>${uploadZone('current','현재 공간 사진 업로드','(현재 공간 사진 1장)')}${objectMode ? uploadZone('material','적용할 자재 이미지 업로드','(재질·색상·패턴 1장)') : uploadZone('reference','워너비 레퍼런스 이미지 업로드','(인스타 레퍼런스 이미지 1장)')}</div>
     ${objectMode ? objectSelectionPanel() : ''}
     <button class='button primary analyze-button ${ready ? '' : 'hidden'}' data-action='${action}' ${state.analyzing ? 'disabled' : ''}>${buttonText}</button>
-    <p class='session-note'>${icon('shield','tool-drawing')} 테스트 계정: 정주희, Angry 감성 가이드 데이터</p>
   </section></div>`;
 }
 
 function renderDashboard() {
   setDocument('홈', state.uploadOpen || state.dialog ? 'modal-open' : '');
   return `<main class='app-page dashboard-legacy-page'>${desktopHeader('home')}${mobileHeader({ house: true })}
-    <section class='landing-hero dashboard-legacy-hero' aria-labelledby='dashboard-home-title'>${mainHeroVideo()}<div class='hero-copy'><h1 id='dashboard-home-title'><span class='hero-title-kicker'>사진 두 장에서 시작되는</span><span class='hero-title-main'>솔직하고 투명한<br>공간의 기록</span></h1><button type='button' class='button hero-cta' data-action='open-upload' aria-label='무료 체험 시작하기'><span class='hero-cta-copy'><span class='hero-cta-title'>Start</span><span class='hero-cta-subtitle'>무료 체험 시작하기</span></span><span class='hero-cta-arrow' aria-hidden='true'>→</span></button></div></section>
+    <section class='landing-hero dashboard-legacy-hero' aria-labelledby='dashboard-home-title'>${mainHeroVideo()}<div class='hero-copy'><h1 id='dashboard-home-title'><span class='hero-title-kicker'>사진 두 장에서 시작되는</span><span class='hero-title-main'>솔직하고 투명한<br>공간의 기록</span></h1><button type='button' class='button hero-cta' data-action='open-upload' aria-label='무료 체험 시작하기'><span class='hero-cta-copy'><span class='hero-cta-title'>Start</span></span><span class='hero-cta-arrow' aria-hidden='true'>→</span></button></div></section>
     ${serviceSection({ signedIn: true })}${bottomNav('home')}${uploadModal()}${dialogMarkup()}</main>`;
 }
 
@@ -780,8 +1034,14 @@ function dialogMarkup() {
 
 function renderProjects() {
   setDocument('내 프로젝트', state.dialog ? 'modal-open' : '');
-  return `<main class='app-page'>${desktopHeader('myproject')}${mobileHeader({back:true})}<div class='app-content'>${appBackButton()}<div class='page-heading'><div><h1>내 프로젝트</h1><p>공간의 변화와 저장된 리포트를 확인하세요.</p></div><button class='button primary desktop-only' data-action='new-project'>새 프로젝트</button></div>
-    ${state.projects.length ? `<div class='project-list'>${state.projects.map((project) => projectCard(project)).join('')}</div>` : `<div class='empty-state'><div><span class='empty-state-icon'>⌂</span><h2>아직 저장한 프로젝트가 없어요.</h2><p class='muted'>사진 두 장으로 첫 공간 기록을 시작해보세요.</p><button class='button primary' data-action='new-project'>프로젝트 시작하기</button></div></div>`}
+  const orderedProjects = [...state.projects].sort((left, right) => {
+    const failedOrder = Number(left.status === 'failed') - Number(right.status === 'failed');
+    if (failedOrder) return failedOrder;
+    return (Date.parse(right.updatedAt || right.createdAt || '') || 0) - (Date.parse(left.updatedAt || left.createdAt || '') || 0);
+  });
+  const failedCount = orderedProjects.filter((project) => project.status === 'failed').length;
+  return `<main class='app-page'>${desktopHeader('myproject')}${mobileHeader({back:true})}<div class='app-content'>${appBackButton()}<div class='page-heading'><div><h1>내 프로젝트</h1><p>공간의 변화와 저장된 리포트를 확인하세요.${failedCount ? ` 실패한 ${failedCount}개 항목은 리포트가 저장되지 않은 재시도 기록입니다.` : ''}</p></div><button class='button primary desktop-only' data-action='new-project'>새 프로젝트</button></div>
+    ${orderedProjects.length ? `<div class='project-list'>${orderedProjects.map((project) => projectCard(project)).join('')}</div>` : `<div class='empty-state'><div><span class='empty-state-icon'>⌂</span><h2>아직 저장한 프로젝트가 없어요.</h2><p class='muted'>사진 두 장으로 첫 공간 기록을 시작해보세요.</p><button class='button primary' data-action='new-project'>프로젝트 시작하기</button></div></div>`}
   </div>${bottomNav('projects')}${dialogMarkup()}</main>`;
 }
 
@@ -1036,6 +1296,7 @@ async function readFile(file) {
       dataUrl: await blobToDataUrl(normalized),
       width,
       height,
+      bytes: normalized.size,
       mimeType: normalized.type
     };
   } catch (error) {
@@ -1046,9 +1307,27 @@ async function readFile(file) {
   }
 }
 
+function validateAnalysisImages(images) {
+  const total = images.reduce((sum, image) => sum + Number(image?.bytes || 0), 0);
+  if (images.some((image) => Number(image?.bytes || 0) > 8 * 1024 * 1024)) {
+    throw new Error('이미지 한 장은 8MB 이하로 업로드해주세요.');
+  }
+  if (total > 24 * 1024 * 1024) {
+    throw new Error('AI 분석 이미지의 총 용량은 24MB 이하로 업로드해주세요.');
+  }
+}
+
 async function setUploadFile(key, file) {
   state.upload[key] = await readFile(file);
-  if (key === 'current') state.upload.selection = { x: 24, y: 22, width: 52, height: 54 };
+  if (key === 'current') {
+    state.upload.selection = { x: 24, y: 22, width: 52, height: 54 };
+    for (const assignment of state.upload.materialAssignments) {
+      assignment.maskStrokes = [];
+      assignment.maskPaths = [];
+      assignment.lassoDraft = null;
+      assignment.autoMask = null;
+    }
+  }
 }
 
 function imageMimeTypeFromUrl(url) {
@@ -1106,18 +1385,19 @@ function clampObjectSelection(selection = {}) {
   };
 }
 
-function selectionToPayload(selection) {
+function selectionToPayload(selection, maskStrokes = [], autoMask = null, maskPaths = []) {
   const normalized = clampObjectSelection(selection);
   return {
     x: Number((normalized.x / 100).toFixed(4)),
     y: Number((normalized.y / 100).toFixed(4)),
     width: Number((normalized.width / 100).toFixed(4)),
     height: Number((normalized.height / 100).toFixed(4)),
+    mode: autoMask ? 'magic-wand' : Array.isArray(maskPaths) && maskPaths.length ? 'lasso' : Array.isArray(maskStrokes) && maskStrokes.length ? 'freehand' : 'rectangle',
     unit: 'normalized'
   };
 }
 
-async function createObjectMask(image, selection) {
+async function createObjectMask(image, selection, maskStrokes = [], autoMask = null, maskPaths = []) {
   if (!image?.width || !image?.height) throw new Error('선택 영역을 만들 공간 사진을 찾지 못했습니다.');
   const normalized = clampObjectSelection(selection);
   const canvas = document.createElement('canvas');
@@ -1128,16 +1408,166 @@ async function createObjectMask(image, selection) {
 
   context.fillStyle = '#000000';
   context.fillRect(0, 0, canvas.width, canvas.height);
-  const x = Math.round((normalized.x / 100) * canvas.width);
-  const y = Math.round((normalized.y / 100) * canvas.height);
-  const width = Math.max(1, Math.round((normalized.width / 100) * canvas.width));
-  const height = Math.max(1, Math.round((normalized.height / 100) * canvas.height));
-  context.fillStyle = '#FFFFFF';
-  context.fillRect(x, y, width, height);
+  if (autoMask?.data?.length && autoMask.width === canvas.width && autoMask.height === canvas.height) {
+    const autoPixels = context.createImageData(canvas.width, canvas.height);
+    for (let index = 0; index < autoMask.data.length; index += 1) {
+      if (!autoMask.data[index]) continue;
+      const offset = index * 4;
+      autoPixels.data[offset] = 255;
+      autoPixels.data[offset + 1] = 255;
+      autoPixels.data[offset + 2] = 255;
+      autoPixels.data[offset + 3] = 255;
+    }
+    context.putImageData(autoPixels, 0, 0);
+  }
+  if (Array.isArray(maskPaths) && maskPaths.length) {
+    context.lineCap = 'round';
+    context.lineJoin = 'round';
+    for (const path of maskPaths) {
+      const points = Array.isArray(path?.points) ? path.points : [];
+      if (points.length < 3) continue;
+      if (path.operation === 'replace') {
+        context.fillStyle = '#000000';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+      }
+      context.beginPath();
+      context.moveTo((Number(points[0].x) / 100) * canvas.width, (Number(points[0].y) / 100) * canvas.height);
+      for (const point of points.slice(1)) context.lineTo((Number(point.x) / 100) * canvas.width, (Number(point.y) / 100) * canvas.height);
+      context.closePath();
+      context.fillStyle = path.operation === 'subtract' ? '#000000' : '#FFFFFF';
+      context.fill();
+    }
+  }
+  if (Array.isArray(maskStrokes) && maskStrokes.length) {
+    context.lineCap = 'round';
+    context.lineJoin = 'round';
+    for (const stroke of maskStrokes) {
+      const points = Array.isArray(stroke?.points) ? stroke.points : [];
+      if (!points.length) continue;
+      const operation = stroke?.operation === 'subtract' ? 'subtract' : stroke?.operation === 'add' ? 'add' : 'replace';
+      if (operation === 'replace') {
+        context.fillStyle = '#000000';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+      }
+      context.strokeStyle = operation === 'subtract' ? '#000000' : '#FFFFFF';
+      context.fillStyle = operation === 'subtract' ? '#000000' : '#FFFFFF';
+      const size = Math.max(8, Math.round(Math.min(canvas.width, canvas.height) * (Number(stroke.size || 10) / 1000)));
+      context.lineWidth = size;
+      const first = points[0];
+      const firstX = (Number(first.x) / 100) * canvas.width;
+      const firstY = (Number(first.y) / 100) * canvas.height;
+      if (points.length === 1) {
+        context.beginPath();
+        context.arc(firstX, firstY, size / 2, 0, Math.PI * 2);
+        context.fill();
+        continue;
+      }
+      context.beginPath();
+      context.moveTo(firstX, firstY);
+      for (const point of points.slice(1)) context.lineTo((Number(point.x) / 100) * canvas.width, (Number(point.y) / 100) * canvas.height);
+      context.stroke();
+    }
+  } else if (!autoMask?.data?.length && !maskPaths.length) {
+    const x = Math.round((normalized.x / 100) * canvas.width);
+    const y = Math.round((normalized.y / 100) * canvas.height);
+    const width = Math.max(1, Math.round((normalized.width / 100) * canvas.width));
+    const height = Math.max(1, Math.round((normalized.height / 100) * canvas.height));
+    context.fillStyle = '#FFFFFF';
+    context.fillRect(x, y, width, height);
+  }
 
   const mask = await canvasToBlob(canvas, 'image/png');
   if (!mask) throw new Error('선택 영역 마스크를 PNG로 저장하지 못했습니다.');
   return blobToDataUrl(mask);
+}
+
+async function decodeDataUrlImage(dataUrl) {
+  let blob;
+  if (String(dataUrl).startsWith('data:')) {
+    const match = String(dataUrl).match(/^data:([^;,]+);base64,([A-Za-z0-9+/=\s]+)$/);
+    if (!match) throw new Error('원본 이미지 데이터 형식을 확인하지 못했습니다.');
+    const binary = atob(match[2].replace(/\s/g, ''));
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    blob = new Blob([bytes], { type: match[1] });
+  } else {
+    const response = await fetch(dataUrl, { credentials: 'same-origin' });
+    if (!response.ok) throw new Error('이미지 보정용 결과를 불러오지 못했습니다.');
+    blob = await response.blob();
+  }
+  return decodeUploadImage(blob);
+}
+
+async function composeMaskedAfterImage(current, afterUrl, masks) {
+  if (!current?.width || !current?.height || !afterUrl || !masks?.length) return null;
+  const source = await decodeDataUrlImage(current.dataUrl);
+  const generated = await decodeDataUrlImage(afterUrl);
+  const width = current.width;
+  const height = current.height;
+  const baseCanvas = document.createElement('canvas');
+  baseCanvas.width = width;
+  baseCanvas.height = height;
+  const baseContext = baseCanvas.getContext('2d', { alpha: false });
+  const generatedCanvas = document.createElement('canvas');
+  generatedCanvas.width = width;
+  generatedCanvas.height = height;
+  const generatedContext = generatedCanvas.getContext('2d');
+  const maskCanvas = document.createElement('canvas');
+  maskCanvas.width = width;
+  maskCanvas.height = height;
+  const maskContext = maskCanvas.getContext('2d');
+  if (!baseContext || !generatedContext || !maskContext) throw new Error('이미지 구도 보정 캔버스를 만들지 못했습니다.');
+
+  baseContext.drawImage(source, 0, 0, width, height);
+  generatedContext.drawImage(generated, 0, 0, width, height);
+  const combinedMask = maskContext.createImageData(width, height);
+  for (const maskDataUrl of masks) {
+    const maskImage = await decodeDataUrlImage(maskDataUrl);
+    maskContext.clearRect(0, 0, width, height);
+    maskContext.drawImage(maskImage, 0, 0, width, height);
+    const pixels = maskContext.getImageData(0, 0, width, height).data;
+    for (let index = 0; index < pixels.length; index += 4) {
+      if (pixels[index] > 128 || pixels[index + 1] > 128 || pixels[index + 2] > 128) combinedMask.data[index + 3] = 255;
+    }
+    if (typeof maskImage.close === 'function') maskImage.close();
+  }
+  maskContext.putImageData(combinedMask, 0, 0);
+  generatedContext.globalCompositeOperation = 'destination-in';
+  generatedContext.drawImage(maskCanvas, 0, 0);
+  baseContext.drawImage(generatedCanvas, 0, 0);
+  if (typeof source.close === 'function') source.close();
+  if (typeof generated.close === 'function') generated.close();
+  const output = await canvasToBlob(baseCanvas, 'image/webp', 0.96) || await canvasToBlob(baseCanvas, 'image/png');
+  if (!output) throw new Error('구도 보정 결과를 저장하지 못했습니다.');
+  return blobToDataUrl(output);
+}
+
+async function finalizeCompositeProject(projectId, afterImage, fallbackProject) {
+  if (!projectId) {
+    throw new Error('AI 분석 응답에 프로젝트 ID가 없습니다. 이미지를 다시 분석해주세요.');
+  }
+  try {
+    return await api(`/api/v1/projects/${encodeURIComponent(projectId)}/after`, {
+      method: 'POST',
+      body: JSON.stringify({ afterImage })
+    });
+  } catch (error) {
+    // A generation is already persisted before the client-side mask composite
+    // is uploaded. If a stale tab races that second request, retry the project
+    // read once and keep the persisted result instead of reporting a misleading
+    // PROJECT_NOT_FOUND error for the original analyze request.
+    if (error.status === 404 && error.details?.code === 'PROJECT_NOT_FOUND') {
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        const recovered = await api(`/api/v1/projects/${encodeURIComponent(projectId)}`);
+        if (recovered?.project?.id === projectId) return recovered;
+      } catch { /* keep the original error below */ }
+      if (fallbackProject?.id === projectId && fallbackProject?.afterUrl) {
+        return { project: fallbackProject };
+      }
+    }
+    throw error;
+  }
 }
 
 function updateObjectSelectionUi(root = document.querySelector('[data-object-selection-root]')) {
@@ -1172,6 +1602,716 @@ function updateObjectSelectionUi(root = document.querySelector('[data-object-sel
   });
   const output = root.querySelector('[data-object-selection-output]');
   if (output) output.textContent = `선택 영역: 왼쪽 ${Math.round(selection.x)}%, 위 ${Math.round(selection.y)}%, 가로 ${Math.round(selection.width)}%, 세로 ${Math.round(selection.height)}%`;
+}
+
+function updateMaterialAssignmentSelectionUi(root, assignment) {
+  if (!root || !assignment) return;
+  const selection = clampObjectSelection(assignment.selection);
+  assignment.selection = selection;
+  root.style.setProperty('--selection-x', `${selection.x}%`);
+  root.style.setProperty('--selection-y', `${selection.y}%`);
+  root.style.setProperty('--selection-width', `${selection.width}%`);
+  root.style.setProperty('--selection-height', `${selection.height}%`);
+  const output = root.querySelector('[data-material-selection-output]');
+  if (output && assignment.autoMask) {
+    output.textContent = '\ub9c8\uc220\ubd09 \uc790\ub3d9 \uc120\ud0dd: \uc801\uc6a9 \uc601\uc5ed \ud1b5\ud569';
+    return;
+  }
+  if (output && Array.isArray(assignment.maskPaths) && assignment.maskPaths.length) {
+    output.textContent = `\ub2e4\uac01\ud615 \uc62c\uac00\ubbf8 \uc120\ud0dd: ${assignment.maskPaths.length}\uac1c \uc601\uc5ed`;
+    return;
+  }
+  if (output && Array.isArray(assignment.maskStrokes) && assignment.maskStrokes.length) {
+    output.textContent = `\uc790\uc720 \uc120\ud0dd: ${assignment.maskStrokes.length}\ud68d`;
+    return;
+  }
+  if (output) output.textContent = `선택 영역: 왼쪽 ${Math.round(selection.x)}%, 위 ${Math.round(selection.y)}%, 가로 ${Math.round(selection.width)}%, 세로 ${Math.round(selection.height)}%`;
+}
+
+function updateMaterialSwatchSelectionUi(root, assignment) {
+  if (!root || !assignment) return;
+  const output = root.querySelector('[data-material-swatch-output]');
+  if (!output) return;
+  if (assignment.materialAutoMask) output.textContent = '\ub9c8\uc220\ubd09 \uc790\ub3d9 \uc120\ud0dd: \uc790\uc7ac \uc601\uc5ed \ud1b5\ud569';
+  else if (assignment.materialMaskPaths?.length) output.textContent = `\ub2e4\uac01\ud615 \uc62c\uac00\ubbf8 \uc120\ud0dd: ${assignment.materialMaskPaths.length}\uac1c \uc601\uc5ed`;
+  else if (assignment.materialMaskStrokes?.length) output.textContent = `\uc790\uc720 \uc120\ud0dd: ${assignment.materialMaskStrokes.length}\ud68d`;
+  else output.textContent = '\uc790\uc7ac \uc804\uccb4\ub97c \uc0ac\uc6a9';
+}
+
+function materialSelectionCanvasPoint(event, stage) {
+  const point = stagePoint(event, stage);
+  return { x: roundedSelectionValue(point.x), y: roundedSelectionValue(point.y) };
+}
+
+function materialSelectionSettings(assignment, kind = 'source') {
+  const swatch = kind === 'swatch';
+  return {
+    image: swatch ? assignment.upload : state.upload.current,
+    selection: swatch ? null : clampObjectSelection(assignment.selection),
+    autoMask: swatch ? assignment.materialAutoMask : assignment.autoMask,
+    strokes: swatch ? assignment.materialMaskStrokes : assignment.maskStrokes,
+    paths: swatch ? assignment.materialMaskPaths : assignment.maskPaths,
+    draft: swatch ? assignment.materialLassoDraft : assignment.lassoDraft,
+    brushSize: swatch ? assignment.materialBrushSize : assignment.brushSize,
+    mode: swatch ? assignment.materialSelectionMode : assignment.selectionMode,
+    tolerance: swatch ? assignment.materialWandTolerance : assignment.wandTolerance,
+    target: assignment.target,
+    maxCoverage: swatch ? 0.82 : ({
+      wall: 0.5,
+      floor: 0.4,
+      furniture: 0.32,
+      sink: 0.12,
+      countertop: 0.12,
+      tile: 0.22,
+      ceiling: 0.22,
+      'door-window': 0.28,
+      decor: 0.16,
+      other: 0.22
+    }[assignment.target] || 0.22)
+  };
+}
+
+function hasMaterialSelection(assignment, kind = 'source') {
+  const settings = materialSelectionSettings(assignment, kind);
+  return Boolean(settings.autoMask || (Array.isArray(settings.strokes) && settings.strokes.length) || (Array.isArray(settings.paths) && settings.paths.length));
+}
+
+function cloneMaterialMask(mask) {
+  if (!mask?.data?.length || !mask.width || !mask.height) return null;
+  return { width: mask.width, height: mask.height, data: new Uint8Array(mask.data), selectedCount: Number(mask.selectedCount || mask.data.reduce((sum, value) => sum + value, 0)) };
+}
+
+function cloneMaterialStrokes(strokes) {
+  return (Array.isArray(strokes) ? strokes : []).map((stroke) => ({
+    operation: stroke?.operation === 'subtract' ? 'subtract' : stroke?.operation === 'add' ? 'add' : 'replace',
+    size: Number(stroke?.size || 10),
+    points: (Array.isArray(stroke?.points) ? stroke.points : []).map((point) => ({ x: Number(point.x), y: Number(point.y) }))
+  }));
+}
+
+function cloneMaterialPaths(paths) {
+  return (Array.isArray(paths) ? paths : []).map((path) => ({
+    operation: path?.operation === 'subtract' ? 'subtract' : path?.operation === 'add' ? 'add' : 'replace',
+    points: (Array.isArray(path?.points) ? path.points : []).map((point) => ({ x: Number(point.x), y: Number(point.y) }))
+  }));
+}
+
+function captureMaterialSelectionSnapshot(assignment) {
+  return {
+    autoMask: cloneMaterialMask(assignment.autoMask),
+    maskStrokes: cloneMaterialStrokes(assignment.maskStrokes),
+    maskPaths: cloneMaterialPaths(assignment.maskPaths),
+    materialAutoMask: cloneMaterialMask(assignment.materialAutoMask),
+    materialMaskStrokes: cloneMaterialStrokes(assignment.materialMaskStrokes),
+    materialMaskPaths: cloneMaterialPaths(assignment.materialMaskPaths)
+  };
+}
+
+function ensureMaterialSelectionHistory(assignment) {
+  if (!assignment) return;
+  if (!Array.isArray(assignment.selectionHistory) || assignment.selectionHistory.length === 0) {
+    assignment.selectionHistory = [captureMaterialSelectionSnapshot(assignment)];
+    assignment.selectionHistoryIndex = 0;
+  }
+}
+
+function recordMaterialSelectionHistory(assignment) {
+  if (!assignment) return;
+  ensureMaterialSelectionHistory(assignment);
+  const next = assignment.selectionHistory.slice(0, assignment.selectionHistoryIndex + 1);
+  next.push(captureMaterialSelectionSnapshot(assignment));
+  assignment.selectionHistory = next.slice(-20);
+  assignment.selectionHistoryIndex = assignment.selectionHistory.length - 1;
+}
+
+function restoreMaterialSelectionSnapshot(assignment, snapshot) {
+  if (!assignment || !snapshot) return;
+  assignment.autoMask = cloneMaterialMask(snapshot.autoMask);
+  assignment.maskStrokes = cloneMaterialStrokes(snapshot.maskStrokes);
+  assignment.maskPaths = cloneMaterialPaths(snapshot.maskPaths);
+  assignment.materialAutoMask = cloneMaterialMask(snapshot.materialAutoMask);
+  assignment.materialMaskStrokes = cloneMaterialStrokes(snapshot.materialMaskStrokes);
+  assignment.materialMaskPaths = cloneMaterialPaths(snapshot.materialMaskPaths);
+}
+
+function updateMaterialSelectionHistoryUi(assignment) {
+  if (!assignment) return;
+  ensureMaterialSelectionHistory(assignment);
+  const canUndo = assignment.selectionHistoryIndex > 0;
+  const canRedo = assignment.selectionHistoryIndex < assignment.selectionHistory.length - 1;
+  document.querySelectorAll(`[data-action='undo-material-selection'][data-id='${assignment.id}']`).forEach((button) => { button.disabled = !canUndo; });
+  document.querySelectorAll(`[data-action='redo-material-selection'][data-id='${assignment.id}']`).forEach((button) => { button.disabled = !canRedo; });
+}
+
+function moveMaterialSelectionHistory(assignment, direction) {
+  if (!assignment) return;
+  ensureMaterialSelectionHistory(assignment);
+  const nextIndex = assignment.selectionHistoryIndex + direction;
+  if (nextIndex < 0 || nextIndex >= assignment.selectionHistory.length) return;
+  assignment.selectionHistoryIndex = nextIndex;
+  restoreMaterialSelectionSnapshot(assignment, assignment.selectionHistory[nextIndex]);
+  refreshMaterialSelectionUi(document.querySelector(`[data-material-selection-root='${assignment.id}']`), assignment);
+  refreshMaterialSelectionUi(document.querySelector(`[data-material-swatch-root='${assignment.id}']`), assignment, 'swatch');
+}
+
+function drawAutoMaskOverlay(context, autoMask) {
+  if (!autoMask?.data?.length || !autoMask.width || !autoMask.height) return;
+  const overlay = context.createImageData(autoMask.width, autoMask.height);
+  for (let index = 0; index < autoMask.data.length; index += 1) {
+    if (!autoMask.data[index]) continue;
+    const offset = index * 4;
+    overlay.data[offset] = 168;
+    overlay.data[offset + 1] = 96;
+    overlay.data[offset + 2] = 48;
+    overlay.data[offset + 3] = 112;
+  }
+  context.putImageData(overlay, 0, 0);
+}
+
+function drawMaterialSelectionPaths(context, paths, draft, width, height) {
+  const drawPath = (path, preview = false) => {
+    const points = Array.isArray(path?.points) ? path.points : [];
+    if (points.length < 2) return;
+    context.beginPath();
+    context.moveTo((Number(points[0].x) / 100) * width, (Number(points[0].y) / 100) * height);
+    for (const point of points.slice(1)) context.lineTo((Number(point.x) / 100) * width, (Number(point.y) / 100) * height);
+    if (!preview && points.length >= 3) context.closePath();
+    if (!preview && points.length >= 3) {
+      context.fillStyle = path.operation === 'subtract' ? 'rgba(112, 55, 45, .18)' : 'rgba(168, 96, 48, .28)';
+      context.fill();
+    }
+    context.strokeStyle = path.operation === 'subtract' ? 'rgba(112, 55, 45, .85)' : 'rgba(168, 96, 48, .9)';
+    context.lineWidth = Math.max(3, Math.round(Math.min(width, height) * .004));
+    context.stroke();
+  };
+  context.save();
+  context.lineCap = 'round';
+  context.lineJoin = 'round';
+  for (const path of Array.isArray(paths) ? paths : []) drawPath(path);
+  if (draft?.points?.length) {
+    context.setLineDash([Math.max(5, Math.round(Math.min(width, height) * .012)), Math.max(4, Math.round(Math.min(width, height) * .008))]);
+    drawPath({ ...draft, points: draft.cursor ? [...draft.points, draft.cursor] : draft.points }, true);
+    context.setLineDash([]);
+    const radius = Math.max(6, Math.round(Math.min(width, height) * .009));
+    const drawVertex = (point, size, closing = false) => {
+      const x = (Number(point.x) / 100) * width;
+      const y = (Number(point.y) / 100) * height;
+      context.beginPath();
+      context.arc(x, y, size, 0, Math.PI * 2);
+      context.fillStyle = closing ? '#FFFFFF' : 'rgba(255,255,255,.96)';
+      context.fill();
+      context.lineWidth = Math.max(2, Math.round(size * .35));
+      context.strokeStyle = closing ? 'rgba(56, 122, 86, .98)' : 'rgba(168, 96, 48, .98)';
+      context.stroke();
+    };
+    draft.points.forEach((point, index) => drawVertex(point, index === 0 ? radius * 1.15 : radius));
+    if (draft.cursor) {
+      const first = draft.points[0];
+      const closing = draft.points.length >= 3 && first && Math.hypot(draft.cursor.x - first.x, draft.cursor.y - first.y) <= 2.5;
+      drawVertex(draft.cursor, radius * (closing ? 1.35 : .82), closing);
+      if (closing) {
+        const x = (Number(first.x) / 100) * width;
+        const y = (Number(first.y) / 100) * height;
+        context.font = `600 ${Math.max(11, Math.round(Math.min(width, height) * .022))}px SUIT, sans-serif`;
+        context.fillStyle = 'rgba(56, 122, 86, .98)';
+        context.fillText('닫기', x + radius * 1.8, y - radius * 1.8);
+      }
+    }
+  }
+  context.restore();
+}
+
+function drawMaterialSelectionCanvas(canvas, assignment, kind = 'source') {
+  const settings = materialSelectionSettings(assignment, kind);
+  const image = settings.image;
+  if (!canvas || !image?.width || !image?.height) return;
+  if (canvas.width !== image.width) canvas.width = image.width;
+  if (canvas.height !== image.height) canvas.height = image.height;
+  const context = canvas.getContext('2d');
+  if (!context) return;
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  drawAutoMaskOverlay(context, settings.autoMask);
+  drawMaterialSelectionPaths(context, settings.paths, settings.draft, canvas.width, canvas.height);
+  const strokes = Array.isArray(settings.strokes) ? settings.strokes : [];
+  if (!strokes.length) return;
+  context.save();
+  context.lineCap = 'round';
+  context.lineJoin = 'round';
+  for (const stroke of strokes) {
+    const points = Array.isArray(stroke?.points) ? stroke.points : [];
+    if (!points.length) continue;
+    const operation = stroke?.operation === 'subtract' ? 'subtract' : stroke?.operation === 'add' ? 'add' : 'replace';
+    context.strokeStyle = operation === 'subtract' ? 'rgba(112, 55, 45, .76)' : 'rgba(168, 96, 48, .62)';
+    context.fillStyle = context.strokeStyle;
+    const size = Math.max(8, Math.round(Math.min(canvas.width, canvas.height) * (Number(stroke.size || settings.brushSize || 10) / 1000)));
+    context.lineWidth = size;
+    const first = points[0];
+    const firstX = (Number(first.x) / 100) * canvas.width;
+    const firstY = (Number(first.y) / 100) * canvas.height;
+    if (points.length === 1) {
+      context.beginPath();
+      context.arc(firstX, firstY, size / 2, 0, Math.PI * 2);
+      context.fill();
+      continue;
+    }
+    context.beginPath();
+    context.moveTo(firstX, firstY);
+    for (const point of points.slice(1)) context.lineTo((Number(point.x) / 100) * canvas.width, (Number(point.y) / 100) * canvas.height);
+    context.stroke();
+  }
+  context.restore();
+}
+
+function readImagePixels(image) {
+  if (!image?.dataUrl) return Promise.reject(new Error('\uc0ac\uc9c4 \ub370\uc774\ud130\ub97c \uc77d\uc744 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4.'));
+  if (imagePixelCache.has(image.dataUrl)) return imagePixelCache.get(image.dataUrl);
+  const promise = new Promise((resolve, reject) => {
+    const element = new Image();
+    element.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = image.width || element.naturalWidth;
+      canvas.height = image.height || element.naturalHeight;
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      if (!context) return reject(new Error('\uc0ac\uc9c4 \uc0c9\uc0c1\uc744 \uc77d\uc744 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4.'));
+      context.drawImage(element, 0, 0, canvas.width, canvas.height);
+      const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+      resolve({ width: canvas.width, height: canvas.height, data: pixels.data });
+    };
+    element.onerror = () => reject(new Error('\uc0ac\uc9c4 \uc0c9\uc0c1\uc744 \uc77d\uc744 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4.'));
+    element.src = image.dataUrl;
+  });
+  imagePixelCache.set(image.dataUrl, promise);
+  return promise;
+}
+
+function weightedPixelDistance(data, offset, color) {
+  const red = data[offset] - color[0];
+  const green = data[offset + 1] - color[1];
+  const blue = data[offset + 2] - color[2];
+  // Luma-weighted RGB keeps nearby tones together while avoiding the overly
+  // permissive Euclidean distance that used to jump across textured edges.
+  return Math.sqrt((0.2126 * red * red) + (0.7152 * green * green) + (0.0722 * blue * blue));
+}
+
+function sampleSeedColor(data, width, height, startX, startY) {
+  const channels = [[], [], []];
+  for (let y = Math.max(0, startY - 1); y <= Math.min(height - 1, startY + 1); y += 1) {
+    for (let x = Math.max(0, startX - 1); x <= Math.min(width - 1, startX + 1); x += 1) {
+      const offset = ((y * width) + x) * 4;
+      channels[0].push(data[offset]);
+      channels[1].push(data[offset + 1]);
+      channels[2].push(data[offset + 2]);
+    }
+  }
+  return channels.map((channel) => {
+    channel.sort((a, b) => a - b);
+    return channel[Math.floor(channel.length / 2)] || 0;
+  });
+}
+
+function pixelNeighbors(index, width, height, callback) {
+  const x = index % width;
+  const y = Math.floor(index / width);
+  if (x > 0) callback(index - 1);
+  if (x < width - 1) callback(index + 1);
+  if (y > 0) callback(index - width);
+  if (y < height - 1) callback(index + width);
+}
+
+function refineConnectedMask(mask, pixels, seed, threshold, maxSelected = Number.POSITIVE_INFINITY) {
+  if (!mask?.data?.length || mask.selectedCount < 8) return mask;
+  let data = mask.data;
+  // One-pass hole filling removes single-pixel pinholes caused by JPEG noise,
+  // but only when at least three adjacent pixels already belong to the region.
+  const next = data.slice();
+  let selectedCount = mask.selectedCount;
+  for (let index = 0; index < data.length; index += 1) {
+    if (data[index]) continue;
+    let selectedNeighbors = 0;
+    pixelNeighbors(index, mask.width, mask.height, (neighbor) => { if (data[neighbor]) selectedNeighbors += 1; });
+    if (selectedNeighbors < 3) continue;
+    const distance = weightedPixelDistance(pixels.data, index * 4, seed);
+    if (distance <= threshold * 1.15 && selectedCount < maxSelected) {
+      next[index] = 1;
+      selectedCount += 1;
+    }
+  }
+  data = next;
+  return { ...mask, data, selectedCount };
+}
+
+async function createConnectedPixelMask(image, point, tolerance = 18, options = {}) {
+  const pixels = await readImagePixels(image);
+  const width = pixels.width;
+  const height = pixels.height;
+  const startX = Math.min(width - 1, Math.max(0, Math.floor((point.x / 100) * width)));
+  const startY = Math.min(height - 1, Math.max(0, Math.floor((point.y / 100) * height)));
+  const start = (startY * width) + startX;
+  const seed = sampleSeedColor(pixels.data, width, height, startX, startY);
+  const normalizedTolerance = Math.max(5, Math.min(80, Number(tolerance) || 18));
+  // Keep the first click conservative. The user can raise tolerance when a
+  // material has a deliberate gradient, while local continuity prevents the
+  // wand from leaking through a dark seam or patterned object.
+  const seedThreshold = 10 + (normalizedTolerance * 2.0);
+  const localThreshold = Math.max(14, Math.min(52, seedThreshold * 0.52));
+  const maxCoverage = Math.max(0.08, Math.min(0.95, Number(options.maxCoverage) || 0.82));
+  const maxSelected = Math.max(1, Math.floor(width * height * maxCoverage));
+  const bounds = options.bounds && Number.isFinite(options.bounds.x) && Number.isFinite(options.bounds.y)
+    ? {
+        minX: Math.max(0, Math.floor((options.bounds.x / 100) * width)),
+        minY: Math.max(0, Math.floor((options.bounds.y / 100) * height)),
+        maxX: Math.min(width - 1, Math.ceil(((options.bounds.x + options.bounds.width) / 100) * width) - 1),
+        maxY: Math.min(height - 1, Math.ceil(((options.bounds.y + options.bounds.height) / 100) * height) - 1)
+      }
+    : null;
+  const withinBounds = (index) => {
+    if (!bounds) return true;
+    const x = index % width;
+    const y = Math.floor(index / width);
+    return x >= bounds.minX && x <= bounds.maxX && y >= bounds.minY && y <= bounds.maxY;
+  };
+  if (!withinBounds(start)) return { width, height, data: new Uint8Array(width * height), selectedCount: 0 };
+  const visited = new Uint8Array(width * height);
+  const selected = new Uint8Array(width * height);
+  const queue = new Int32Array(width * height);
+  let head = 0;
+  let tail = 0;
+  queue[tail++] = start;
+  visited[start] = 1;
+  selected[start] = 1;
+  let selectedCount = 1;
+  while (head < tail) {
+    const index = queue[head++];
+    const currentOffset = index * 4;
+    pixelNeighbors(index, width, height, (neighbor) => {
+      if (visited[neighbor]) return;
+      visited[neighbor] = 1;
+      if (!withinBounds(neighbor)) return;
+      const neighborOffset = neighbor * 4;
+      const seedDistance = weightedPixelDistance(pixels.data, neighborOffset, seed);
+      const localDistance = weightedPixelDistance(pixels.data, neighborOffset, [
+        pixels.data[currentOffset], pixels.data[currentOffset + 1], pixels.data[currentOffset + 2]
+      ]);
+      if (seedDistance > seedThreshold || localDistance > localThreshold) return;
+      if (selectedCount >= maxSelected) return;
+      selected[neighbor] = 1;
+      selectedCount += 1;
+      queue[tail++] = neighbor;
+    });
+  }
+  return refineConnectedMask({ width, height, data: selected, selectedCount }, pixels, seed, seedThreshold, maxSelected);
+}
+
+function mergeMaterialMasks(existing, incoming) {
+  if (!incoming) return existing || null;
+  if (!existing || existing.width !== incoming.width || existing.height !== incoming.height) return incoming;
+  for (let index = 0; index < existing.data.length; index += 1) existing.data[index] = existing.data[index] || incoming.data[index] ? 1 : 0;
+  existing.selectedCount = existing.data.reduce((sum, value) => sum + value, 0);
+  return existing;
+}
+
+function subtractMaterialMasks(existing, incoming) {
+  if (!existing || !incoming || existing.width !== incoming.width || existing.height !== incoming.height) return existing;
+  for (let index = 0; index < existing.data.length; index += 1) {
+    if (incoming.data[index]) existing.data[index] = 0;
+  }
+  existing.selectedCount = existing.data.reduce((sum, value) => sum + value, 0);
+  return existing.selectedCount ? existing : null;
+}
+
+function materialMaskContainsPoint(mask, point) {
+  if (!mask?.data?.length || !mask.width || !mask.height) return false;
+  const x = Math.min(mask.width - 1, Math.max(0, Math.floor((point.x / 100) * mask.width)));
+  const y = Math.min(mask.height - 1, Math.max(0, Math.floor((point.y / 100) * mask.height)));
+  return Boolean(mask.data[(y * mask.width) + x]);
+}
+
+function lassoSettings(assignment, kind = 'source') {
+  const swatch = kind === 'swatch';
+  return {
+    paths: swatch ? assignment.materialMaskPaths : assignment.maskPaths,
+    draftKey: swatch ? 'materialLassoDraft' : 'lassoDraft',
+    clear: () => {
+      if (swatch) {
+        assignment.materialAutoMask = null;
+        assignment.materialMaskStrokes = [];
+        assignment.materialMaskPaths = [];
+      } else {
+        assignment.autoMask = null;
+        assignment.maskStrokes = [];
+        assignment.maskPaths = [];
+      }
+    },
+    setPaths: (paths) => {
+      if (swatch) assignment.materialMaskPaths = paths;
+      else assignment.maskPaths = paths;
+    }
+  };
+}
+
+function lassoDraftFor(assignment, kind = 'source') {
+  return assignment?.[lassoSettings(assignment, kind).draftKey] || null;
+}
+
+function setLassoDraft(assignment, kind, draft) {
+  if (!assignment) return;
+  assignment[lassoSettings(assignment, kind).draftKey] = draft;
+}
+
+function cancelLassoDraft(assignment, kind, root) {
+  if (!assignment) return;
+  setLassoDraft(assignment, kind, null);
+  refreshMaterialSelectionUi(root, assignment, kind);
+}
+
+function completeLassoPath(assignment, kind, root) {
+  const draft = lassoDraftFor(assignment, kind);
+  if (!draft || draft.points.length < 3) {
+    cancelLassoDraft(assignment, kind, root);
+    return false;
+  }
+  const settings = lassoSettings(assignment, kind);
+  const path = {
+    operation: draft.operation === 'subtract' ? 'subtract' : draft.operation === 'add' ? 'add' : 'replace',
+    points: draft.points.map((point) => ({ x: Number(point.x), y: Number(point.y) }))
+  };
+  const paths = path.operation === 'replace' ? [] : (Array.isArray(settings.paths) ? settings.paths : []);
+  if (path.operation === 'replace') settings.clear();
+  settings.setPaths([...paths, path]);
+  setLassoDraft(assignment, kind, null);
+  recordMaterialSelectionHistory(assignment);
+  refreshMaterialSelectionUi(root, assignment, kind);
+  return true;
+}
+
+function addLassoPoint(assignment, kind, point, event, root) {
+  const existing = lassoDraftFor(assignment, kind);
+  if (!existing) {
+    const operation = event.altKey ? 'subtract' : (event.ctrlKey || event.metaKey || event.shiftKey) ? 'add' : 'replace';
+    if (operation === 'replace') {
+      lassoSettings(assignment, kind).clear();
+      recordMaterialSelectionHistory(assignment);
+    }
+    setLassoDraft(assignment, kind, { operation, points: [], cursor: point });
+  }
+  const draft = lassoDraftFor(assignment, kind);
+  const first = draft.points[0];
+  const closes = first && draft.points.length >= 3 && Math.hypot(point.x - first.x, point.y - first.y) <= 2.5;
+  if (closes) return completeLassoPath(assignment, kind, root);
+  draft.points.push({ x: roundedSelectionValue(point.x), y: roundedSelectionValue(point.y) });
+  draft.cursor = point;
+  if (event.detail >= 2 && draft.points.length >= 3) return completeLassoPath(assignment, kind, root);
+  refreshMaterialSelectionUi(root, assignment, kind);
+  return false;
+}
+
+async function applyMagicWandSelection(assignment, kind, point, root, options = {}) {
+  const settings = materialSelectionSettings(assignment, kind);
+  if (!settings.image || assignment.selectionBusy) return;
+  assignment.selectionBusy = true;
+  root?.classList.add('is-selecting');
+  const output = root?.querySelector(kind === 'swatch' ? '[data-material-swatch-output]' : '[data-material-selection-output]');
+  if (output) output.textContent = '\ub9c8\uc220\ubd09\uc73c\ub85c \uc0c9\uc0c1\uacfc \ud1a4\uc774 \ube44\uc2b7\ud55c \uc5f0\uacb0 \uc601\uc5ed\uc744 \uac80\uc0c9\ud558\ub294 \uc911...';
+  try {
+    const mask = await createConnectedPixelMask(settings.image, point, settings.tolerance, {
+      maxCoverage: settings.maxCoverage,
+      bounds: settings.selection
+    });
+    if (!mask.selectedCount) throw new Error('\uc120\ud0dd\ud560 \uc720\uc0ac \uc601\uc5ed\uc774 \uc5c6\uc2b5\ub2c8\ub2e4.');
+    const currentMask = kind === 'swatch' ? assignment.materialAutoMask : assignment.autoMask;
+    const isAdditive = Boolean(options.additive);
+    const isSubtractive = Boolean(options.subtractive);
+    const shouldToggleOff = !isAdditive && !isSubtractive && materialMaskContainsPoint(currentMask, point);
+    const nextMask = isSubtractive || shouldToggleOff
+      ? subtractMaterialMasks(currentMask, mask)
+      : isAdditive
+      ? mergeMaterialMasks(currentMask, mask)
+      : mask;
+    if (kind === 'swatch') {
+      assignment.materialAutoMask = nextMask;
+      if (!isAdditive) {
+        assignment.materialMaskStrokes = [];
+        assignment.materialMaskPaths = [];
+      }
+    } else {
+      assignment.autoMask = nextMask;
+      if (!isAdditive) {
+        assignment.maskStrokes = [];
+        assignment.maskPaths = [];
+      }
+    }
+    recordMaterialSelectionHistory(assignment);
+  } catch (error) {
+    notify(error.message);
+  } finally {
+    assignment.selectionBusy = false;
+    root?.classList.remove('is-selecting');
+    refreshMaterialSelectionUi(root, assignment, kind);
+  }
+}
+
+function refreshMaterialSelectionUi(root, assignment, kind = 'source') {
+  if (!root || !assignment) return;
+  ensureMaterialSelectionHistory(assignment);
+  root.classList.toggle('has-selection', hasMaterialSelection(assignment, kind));
+  if (kind === 'swatch') updateMaterialSwatchSelectionUi(root, assignment);
+  else updateMaterialAssignmentSelectionUi(root, assignment);
+  drawMaterialSelectionCanvas(root.querySelector(kind === 'swatch' ? '[data-material-swatch-canvas]' : '[data-material-selection-canvas]'), assignment, kind);
+  updateMaterialSelectionHistoryUi(assignment);
+}
+
+function bindMaterialSelectionCanvases() {
+  document.querySelectorAll('[data-material-selection-canvas]').forEach((canvas) => {
+    const assignment = findMaterialAssignment(canvas.dataset.materialSelectionCanvas);
+    const stage = canvas.closest('[data-material-selection-stage]');
+    if (!assignment || !stage) return;
+    canvas.width = state.upload.current?.width || 1;
+    canvas.height = state.upload.current?.height || 1;
+    drawMaterialSelectionCanvas(canvas, assignment);
+    ensureMaterialSelectionHistory(assignment);
+    updateMaterialSelectionHistoryUi(assignment);
+    let gesture = null;
+    const finish = (event) => {
+      if (!gesture || event.pointerId !== gesture.pointerId) return;
+      try { canvas.releasePointerCapture(event.pointerId); } catch { /* pointer capture can already be released */ }
+      gesture = null;
+      recordMaterialSelectionHistory(assignment);
+      refreshMaterialSelectionUi(canvas.closest('[data-material-selection-root]'), assignment);
+    };
+    canvas.addEventListener('pointerdown', (event) => {
+      if (event.pointerType === 'mouse' && event.button !== 0) return;
+      const point = materialSelectionCanvasPoint(event, stage);
+      state.upload.activeSelection = { assignmentId: assignment.id, kind: 'source' };
+      if (assignment.selectionMode === 'lasso') {
+        event.preventDefault();
+        addLassoPoint(assignment, 'source', point, event, canvas.closest('[data-material-selection-root]'));
+        return;
+      }
+      if (assignment.selectionMode === 'magic-wand') {
+        event.preventDefault();
+        void applyMagicWandSelection(assignment, 'source', point, canvas.closest('[data-material-selection-root]'), { additive: event.ctrlKey || event.metaKey || event.shiftKey, subtractive: event.altKey });
+        return;
+      }
+      ensureMaterialSelectionHistory(assignment);
+      const additive = event.ctrlKey || event.metaKey || event.shiftKey;
+      const subtractive = event.altKey;
+      if (!additive && !subtractive) {
+        assignment.autoMask = null;
+        assignment.maskStrokes = [];
+        assignment.maskPaths = [];
+        recordMaterialSelectionHistory(assignment);
+      }
+      const stroke = { operation: subtractive ? 'subtract' : additive ? 'add' : 'replace', size: Number(assignment.brushSize || 10), points: [point] };
+      assignment.maskStrokes = Array.isArray(assignment.maskStrokes) ? assignment.maskStrokes : [];
+      assignment.maskStrokes.push(stroke);
+      gesture = { pointerId: event.pointerId, stroke };
+      canvas.setPointerCapture?.(event.pointerId);
+      drawMaterialSelectionCanvas(canvas, assignment);
+      refreshMaterialSelectionUi(canvas.closest('[data-material-selection-root]'), assignment);
+      event.preventDefault();
+    });
+    canvas.addEventListener('pointermove', (event) => {
+      if (!gesture && assignment.selectionMode === 'lasso' && lassoDraftFor(assignment, 'source')) {
+        const point = materialSelectionCanvasPoint(event, stage);
+        const draft = lassoDraftFor(assignment, 'source');
+        draft.cursor = point;
+        drawMaterialSelectionCanvas(canvas, assignment);
+        event.preventDefault();
+        return;
+      }
+      if (!gesture || event.pointerId !== gesture.pointerId) return;
+      const point = materialSelectionCanvasPoint(event, stage);
+      const previous = gesture.stroke.points.at(-1);
+      const distance = Math.hypot(point.x - previous.x, point.y - previous.y);
+      if (distance < 0.15) return;
+      gesture.stroke.points.push(point);
+      drawMaterialSelectionCanvas(canvas, assignment);
+      event.preventDefault();
+    });
+    canvas.addEventListener('pointerup', finish);
+    canvas.addEventListener('pointercancel', finish);
+    canvas.addEventListener('dblclick', (event) => {
+      if (assignment.selectionMode !== 'lasso') return;
+      event.preventDefault();
+      completeLassoPath(assignment, 'source', canvas.closest('[data-material-selection-root]'));
+    });
+  });
+  document.querySelectorAll('[data-material-swatch-canvas]').forEach((canvas) => {
+    const assignment = findMaterialAssignment(canvas.dataset.materialSwatchCanvas);
+    const stage = canvas.closest('[data-material-swatch-stage]');
+    if (!assignment || !stage || !assignment.upload) return;
+    canvas.width = assignment.upload.width || 1;
+    canvas.height = assignment.upload.height || 1;
+    drawMaterialSelectionCanvas(canvas, assignment, 'swatch');
+    ensureMaterialSelectionHistory(assignment);
+    updateMaterialSelectionHistoryUi(assignment);
+    let gesture = null;
+    const root = canvas.closest('[data-material-swatch-root]');
+    const finish = (event) => {
+      if (!gesture || event.pointerId !== gesture.pointerId) return;
+      try { canvas.releasePointerCapture(event.pointerId); } catch { /* pointer capture can already be released */ }
+      gesture = null;
+      recordMaterialSelectionHistory(assignment);
+      refreshMaterialSelectionUi(root, assignment, 'swatch');
+    };
+    canvas.addEventListener('pointerdown', (event) => {
+      if (event.pointerType === 'mouse' && event.button !== 0) return;
+      const point = materialSelectionCanvasPoint(event, stage);
+      state.upload.activeSelection = { assignmentId: assignment.id, kind: 'swatch' };
+      if (assignment.materialSelectionMode === 'lasso') {
+        event.preventDefault();
+        addLassoPoint(assignment, 'swatch', point, event, root);
+        return;
+      }
+      if (assignment.materialSelectionMode === 'magic-wand') {
+        event.preventDefault();
+        void applyMagicWandSelection(assignment, 'swatch', point, root, { additive: event.ctrlKey || event.metaKey || event.shiftKey, subtractive: event.altKey });
+        return;
+      }
+      ensureMaterialSelectionHistory(assignment);
+      const additive = event.ctrlKey || event.metaKey || event.shiftKey;
+      const subtractive = event.altKey;
+      if (!additive && !subtractive) {
+        assignment.materialAutoMask = null;
+        assignment.materialMaskStrokes = [];
+        assignment.materialMaskPaths = [];
+        recordMaterialSelectionHistory(assignment);
+      }
+      const stroke = { operation: subtractive ? 'subtract' : additive ? 'add' : 'replace', size: Number(assignment.materialBrushSize || 10), points: [point] };
+      assignment.materialMaskStrokes = Array.isArray(assignment.materialMaskStrokes) ? assignment.materialMaskStrokes : [];
+      assignment.materialMaskStrokes.push(stroke);
+      gesture = { pointerId: event.pointerId, stroke };
+      canvas.setPointerCapture?.(event.pointerId);
+      drawMaterialSelectionCanvas(canvas, assignment, 'swatch');
+      refreshMaterialSelectionUi(root, assignment, 'swatch');
+      event.preventDefault();
+    });
+    canvas.addEventListener('pointermove', (event) => {
+      if (!gesture && assignment.materialSelectionMode === 'lasso' && lassoDraftFor(assignment, 'swatch')) {
+        const point = materialSelectionCanvasPoint(event, stage);
+        const draft = lassoDraftFor(assignment, 'swatch');
+        draft.cursor = point;
+        drawMaterialSelectionCanvas(canvas, assignment, 'swatch');
+        event.preventDefault();
+        return;
+      }
+      if (!gesture || event.pointerId !== gesture.pointerId) return;
+      const point = materialSelectionCanvasPoint(event, stage);
+      const previous = gesture.stroke.points.at(-1);
+      const distance = Math.hypot(point.x - previous.x, point.y - previous.y);
+      if (distance < 0.15) return;
+      gesture.stroke.points.push(point);
+      drawMaterialSelectionCanvas(canvas, assignment, 'swatch');
+      event.preventDefault();
+    });
+    canvas.addEventListener('pointerup', finish);
+    canvas.addEventListener('pointercancel', finish);
+    canvas.addEventListener('dblclick', (event) => {
+      if (assignment.materialSelectionMode !== 'lasso') return;
+      event.preventDefault();
+      completeLassoPath(assignment, 'swatch', root);
+    });
+  });
 }
 
 function stagePoint(event, stage) {
@@ -1396,20 +2536,122 @@ async function handleAction(button) {
   else if (action === 'demo-login') {
     const data = await api('/api/v1/auth/demo', { method: 'POST', body: '{}' }); resetUserState(); state.user = data.user; notify('테스트 계정으로 로그인했습니다.'); navigate('/dashboard', { replace: true });
   }
-  else if (action === 'open-upload' || action === 'new-project' || action === 'retry-project') { rememberFocus(button); if (location.pathname !== '/dashboard') { navigate('/dashboard'); setTimeout(() => { state.uploadOpen = true; document.body.classList.add('modal-open'); app.innerHTML = renderDashboard(); bindPage(); }, 0); } else { state.uploadOpen = true; document.body.classList.add('modal-open'); app.innerHTML = renderDashboard(); bindPage(); } }
-  else if (action === 'close-upload') { state.uploadOpen = false; state.analyzing = false; document.body.classList.remove('modal-open'); app.innerHTML = renderDashboard(); bindPage(); restoreFocus(); }
-  else if (action === 'backdrop-close') { state.uploadOpen = false; document.body.classList.remove('modal-open'); app.innerHTML = renderDashboard(); bindPage(); restoreFocus(); }
+  else if (action === 'open-upload' || action === 'new-project' || action === 'retry-project') { rememberFocus(button); state.analysisError = null; state.analysisPhase = null; if (location.pathname !== '/dashboard') { navigate('/dashboard'); setTimeout(() => { state.uploadOpen = true; document.body.classList.add('modal-open'); app.innerHTML = renderDashboard(); bindPage(); }, 0); } else { state.uploadOpen = true; document.body.classList.add('modal-open'); app.innerHTML = renderDashboard(); bindPage(); } }
+  else if (action === 'close-upload') { state.uploadOpen = false; state.analyzing = false; state.analysisError = null; state.analysisPhase = null; document.body.classList.remove('modal-open'); app.innerHTML = renderDashboard(); bindPage(); restoreFocus(); }
+  else if (action === 'backdrop-close') { state.uploadOpen = false; state.analyzing = false; state.analysisError = null; state.analysisPhase = null; document.body.classList.remove('modal-open'); app.innerHTML = renderDashboard(); bindPage(); restoreFocus(); }
+  else if (action === 'add-material-assignment') {
+    if (state.upload.materialAssignments.length >= 12) return;
+    const used = new Set(state.upload.materialAssignments.map((item) => item.target));
+    const nextTarget = MATERIAL_TARGET_OPTIONS.find((option) => !used.has(option.id))?.id || 'other';
+    state.upload.materialAssignments.push(createMaterialAssignment(nextTarget));
+    app.innerHTML = renderDashboard();
+    bindPage();
+  }
+  else if (action === 'remove-material-assignment') {
+    if (state.upload.materialAssignments.length <= 1) return;
+    state.upload.materialAssignments = state.upload.materialAssignments.filter((item) => item.id !== button.dataset.id);
+    app.innerHTML = renderDashboard();
+    bindPage();
+  }
+  else if (action === 'reset-material-selection') {
+    const assignment = findMaterialAssignment(button.dataset.id);
+    if (!assignment) return;
+    assignment.maskStrokes = [];
+    assignment.maskPaths = [];
+    assignment.lassoDraft = null;
+    assignment.autoMask = null;
+    recordMaterialSelectionHistory(assignment);
+    const root = document.querySelector(`[data-material-selection-root='${assignment.id}']`);
+    refreshMaterialSelectionUi(root, assignment);
+  }
+  else if (action === 'reset-material-swatch-selection') {
+    const assignment = findMaterialAssignment(button.dataset.id);
+    if (!assignment) return;
+    assignment.materialMaskStrokes = [];
+    assignment.materialMaskPaths = [];
+    assignment.materialLassoDraft = null;
+    assignment.materialAutoMask = null;
+    recordMaterialSelectionHistory(assignment);
+    const root = document.querySelector(`[data-material-swatch-root='${assignment.id}']`);
+    refreshMaterialSelectionUi(root, assignment, 'swatch');
+  }
+  else if (action === 'undo-material-selection' || action === 'redo-material-selection') {
+    moveMaterialSelectionHistory(findMaterialAssignment(button.dataset.id), action === 'undo-material-selection' ? -1 : 1);
+  }
+  else if (action === 'material-assignments-analyze') {
+    const { current, materialAssignments } = state.upload;
+    if (!current || !materialAssignmentsReady() || state.analyzing) return;
+    try { validateAnalysisImages([current, ...materialAssignments.map((item) => item.upload)]); }
+    catch (error) { state.analysisError = analysisErrorMessage(error); notify(state.analysisError); app.innerHTML = renderDashboard(); bindPage(); revealAnalysisError(); return; }
+    state.analysisError = null;
+    state.analysisPhase = 'preparing';
+    state.analyzing = true;
+    app.innerHTML = renderDashboard();
+    bindPage();
+    try {
+      const masks = await Promise.all(materialAssignments.map((item) => createObjectMask(current, item.selection, item.maskStrokes, item.autoMask, item.maskPaths)));
+      const materialMasks = await Promise.all(materialAssignments.map((item) => hasMaterialSelection(item, 'swatch')
+        ? createObjectMask(item.upload, { x: 0, y: 0, width: 100, height: 100 }, item.materialMaskStrokes, item.materialAutoMask, item.materialMaskPaths)
+        : null));
+      updateAnalysisProgress('Gemini가 원본 구도를 유지한 최종 이미지를 생성하고 있습니다.');
+      validateAnalysisImages([
+        current,
+        ...materialAssignments.map((item) => item.upload),
+        ...masks.map((dataUrl) => ({ bytes: Math.floor((dataUrl.split(',')[1]?.length || 0) * 0.75) })),
+        ...materialMasks.filter(Boolean).map((dataUrl) => ({ bytes: Math.floor((dataUrl.split(',')[1]?.length || 0) * 0.75) }))
+      ]);
+      const data = await api('/api/v1/projects/analyze', {
+        method: 'POST',
+        body: JSON.stringify({
+          currentImage: current.dataUrl,
+          materialAssignments: materialAssignments.map(({ target, upload, selection, maskStrokes, maskPaths, autoMask }, index) => ({
+            target,
+            image: upload.dataUrl,
+            mask: masks[index],
+            ...(materialMasks[index] ? { materialMask: materialMasks[index] } : {}),
+            selection: selectionToPayload(selection, maskStrokes, autoMask, maskPaths)
+          }))
+        })
+      });
+      assertGeneratedProject(data);
+      const compositedAfter = data.project?.afterUrl
+        ? await composeMaskedAfterImage(current, data.project.afterUrl, masks)
+        : null;
+      const finalized = compositedAfter
+        ? await finalizeCompositeProject(data.project?.id, compositedAfter, data.project)
+        : data;
+      assertGeneratedProject(finalized);
+      state.project = finalized.project || data.project;
+      state.upload = createUploadState();
+      state.analyzing = false;
+      state.analysisPhase = null;
+      navigate(finalized.next || data.next || (finalized.project?.id ? `/reports/${encodeURIComponent(finalized.project.id)}` : '/projects'));
+    } catch (error) {
+      state.analyzing = false;
+      state.analysisError = analysisErrorMessage(error);
+      state.analysisPhase = null;
+      app.innerHTML = renderDashboard();
+      bindPage();
+      revealAnalysisError();
+      notify(state.analysisError);
+    }
+  }
   else if (action === 'analyze') {
     if (!state.upload.current || !state.upload.reference || state.analyzing) return;
+    state.analysisError = null;
+    state.analysisPhase = 'requesting';
     state.analyzing = true; app.innerHTML = renderDashboard(); bindPage();
     try {
       const data = await api('/api/v1/projects/analyze', { method: 'POST', body: JSON.stringify({ currentImage: state.upload.current.dataUrl, referenceImage: state.upload.reference.dataUrl }) });
-      state.project = data.project; state.upload = createUploadState(); state.analyzing = false; navigate(data.next);
-    } catch (error) { state.analyzing = false; app.innerHTML = renderDashboard(); bindPage(); notify(error.message); }
+      assertGeneratedProject(data);
+      state.project = data.project; state.upload = createUploadState(); state.analyzing = false; state.analysisError = null; state.analysisPhase = null; navigate(data.next);
+    } catch (error) { state.analyzing = false; state.analysisError = analysisErrorMessage(error); state.analysisPhase = null; app.innerHTML = renderDashboard(); bindPage(); revealAnalysisError(); notify(state.analysisError); }
   }
   else if (action === 'object-material-analyze') {
     const { current, material, targetObject, selection } = state.upload;
     if (!current || !material || state.analyzing) return;
+    state.analysisError = null;
+    state.analysisPhase = 'requesting';
     state.analyzing = true; app.innerHTML = renderDashboard(); bindPage();
     try {
       const maskImage = await createObjectMask(current, selection);
@@ -1423,11 +2665,14 @@ async function handleAction(button) {
           selection: selectionToPayload(selection)
         })
       });
+      assertGeneratedProject(data);
       state.project = data.project;
       state.upload = createUploadState();
       state.analyzing = false;
+      state.analysisError = null;
+      state.analysisPhase = null;
       navigate(data.next || (data.project?.id ? `/reports/${encodeURIComponent(data.project.id)}` : '/projects'));
-    } catch (error) { state.analyzing = false; app.innerHTML = renderDashboard(); bindPage(); notify(error.message); }
+    } catch (error) { state.analyzing = false; state.analysisError = analysisErrorMessage(error); state.analysisPhase = null; app.innerHTML = renderDashboard(); bindPage(); revealAnalysisError(); notify(state.analysisError); }
   }
   else if (action === 'rollback-baseline') await rollbackToBaseline(button);
   else if (action === 'open-version-analyze') await openVersionAnalyze(button);
@@ -1506,21 +2751,121 @@ function bindPage() {
     catch (error) { errorBox.textContent = error.message; }
   });
   document.querySelector('#all-terms')?.addEventListener('change', (event) => document.querySelectorAll('.terms-box input').forEach((input) => { input.checked = event.target.checked; }));
+  document.querySelectorAll('[data-material-target]').forEach((select) => select.addEventListener('change', () => {
+    const assignment = findMaterialAssignment(select.dataset.materialTarget);
+    if (!assignment) return;
+    assignment.target = select.value;
+    assignment.selection = defaultMaterialSelection(assignment.target);
+    assignment.maskStrokes = [];
+    assignment.maskPaths = [];
+    assignment.lassoDraft = null;
+    assignment.autoMask = null;
+    app.innerHTML = renderDashboard();
+    bindPage();
+  }));
+  document.querySelectorAll('[data-material-selection-field]').forEach((input) => input.addEventListener('input', () => {
+    const assignment = findMaterialAssignment(input.dataset.materialSelectionId);
+    if (!assignment) return;
+    assignment.selection = clampObjectSelection({
+      ...assignment.selection,
+      [input.dataset.materialSelectionField]: Number(input.value)
+    });
+    updateMaterialAssignmentSelectionUi(input.closest('[data-material-selection-root]'), assignment);
+  }));
+  document.querySelectorAll('[data-material-brush-size]').forEach((input) => input.addEventListener('input', () => {
+    const assignment = findMaterialAssignment(input.dataset.materialBrushSize);
+    if (!assignment) return;
+    assignment.brushSize = Number(input.value) || 10;
+    const value = document.querySelector(`[data-material-brush-value='${assignment.id}']`);
+    if (value) value.textContent = String(Math.round(assignment.brushSize));
+    drawMaterialSelectionCanvas(document.querySelector(`[data-material-selection-canvas='${assignment.id}']`), assignment);
+  }));
+  document.querySelectorAll('[data-material-selection-mode]').forEach((input) => input.addEventListener('change', () => {
+    const assignment = findMaterialAssignment(input.dataset.materialSelectionMode);
+    if (!assignment) return;
+    assignment.selectionMode = ['freehand', 'lasso'].includes(input.value) ? input.value : 'magic-wand';
+    assignment.lassoDraft = null;
+    refreshMaterialSelectionUi(input.closest('[data-material-selection-root]'), assignment);
+  }));
+  document.querySelectorAll('[data-material-wand-tolerance]').forEach((input) => input.addEventListener('input', () => {
+    const assignment = findMaterialAssignment(input.dataset.materialWandTolerance);
+    if (!assignment) return;
+    assignment.wandTolerance = Number(input.value) || 18;
+    const output = document.querySelector(`[data-material-wand-value='${assignment.id}']`);
+    if (output) output.textContent = String(Math.round(assignment.wandTolerance));
+  }));
+  document.querySelectorAll('[data-material-swatch-mode]').forEach((input) => input.addEventListener('change', () => {
+    const assignment = findMaterialAssignment(input.dataset.materialSwatchMode);
+    if (!assignment) return;
+    assignment.materialSelectionMode = ['freehand', 'lasso'].includes(input.value) ? input.value : 'magic-wand';
+    assignment.materialLassoDraft = null;
+    refreshMaterialSelectionUi(input.closest('[data-material-swatch-root]'), assignment, 'swatch');
+  }));
+  document.querySelectorAll('[data-material-swatch-tolerance]').forEach((input) => input.addEventListener('input', () => {
+    const assignment = findMaterialAssignment(input.dataset.materialSwatchTolerance);
+    if (!assignment) return;
+    assignment.materialWandTolerance = Number(input.value) || 18;
+    const output = document.querySelector(`[data-material-swatch-tolerance-value='${assignment.id}']`);
+    if (output) output.textContent = String(Math.round(assignment.materialWandTolerance));
+  }));
+  document.querySelectorAll('[data-material-swatch-brush-size]').forEach((input) => input.addEventListener('input', () => {
+    const assignment = findMaterialAssignment(input.dataset.materialSwatchBrushSize);
+    if (!assignment) return;
+    assignment.materialBrushSize = Number(input.value) || 10;
+    const output = document.querySelector(`[data-material-swatch-brush-value='${assignment.id}']`);
+    if (output) output.textContent = String(Math.round(assignment.materialBrushSize));
+    drawMaterialSelectionCanvas(document.querySelector(`[data-material-swatch-canvas='${assignment.id}']`), assignment, 'swatch');
+  }));
+  document.querySelectorAll('[data-material-upload]').forEach((input) => input.addEventListener('change', async () => {
+    const assignment = findMaterialAssignment(input.dataset.materialUpload);
+    if (!assignment) return;
+    state.analysisError = null;
+    try {
+      assignment.upload = await readFile(input.files[0]);
+      assignment.materialMaskStrokes = [];
+      assignment.materialMaskPaths = [];
+      assignment.materialLassoDraft = null;
+      assignment.materialAutoMask = null;
+      app.innerHTML = renderDashboard();
+      bindPage();
+    } catch (error) { notify(error.message); }
+  }));
+  document.querySelectorAll('[data-material-drop]').forEach((zone) => {
+    for (const type of ['dragenter', 'dragover']) zone.addEventListener(type, (event) => { event.preventDefault(); zone.classList.add('dragging'); });
+    for (const type of ['dragleave', 'drop']) zone.addEventListener(type, (event) => { event.preventDefault(); zone.classList.remove('dragging'); });
+    zone.addEventListener('drop', async (event) => {
+      const assignment = findMaterialAssignment(zone.dataset.materialDrop);
+      if (!assignment) return;
+      state.analysisError = null;
+      try {
+        assignment.upload = await readFile(event.dataTransfer.files[0]);
+        assignment.materialMaskStrokes = [];
+        assignment.materialMaskPaths = [];
+        assignment.materialLassoDraft = null;
+        assignment.materialAutoMask = null;
+        app.innerHTML = renderDashboard();
+        bindPage();
+      } catch (error) { notify(error.message); }
+    });
+  });
   document.querySelectorAll('[data-upload-mode]').forEach((input) => input.addEventListener('change', () => {
     if (!input.checked) return;
     state.upload.mode = input.value;
     state.analyzing = false;
+    state.analysisError = null;
+    state.analysisPhase = null;
     app.innerHTML = renderDashboard();
     bindPage();
   }));
   document.querySelectorAll('[data-upload]').forEach((input) => input.addEventListener('change', async () => {
+    state.analysisError = null;
     try { await setUploadFile(input.dataset.upload, input.files[0]); app.innerHTML = renderDashboard(); bindPage(); }
     catch (error) { notify(error.message); }
   }));
   document.querySelectorAll('[data-drop]').forEach((zone) => {
     for (const type of ['dragenter','dragover']) zone.addEventListener(type, (event) => { event.preventDefault(); zone.classList.add('dragging'); });
     for (const type of ['dragleave','drop']) zone.addEventListener(type, (event) => { event.preventDefault(); zone.classList.remove('dragging'); });
-    zone.addEventListener('drop', async (event) => { try { await setUploadFile(zone.dataset.drop, event.dataTransfer.files[0]); app.innerHTML = renderDashboard(); bindPage(); } catch (error) { notify(error.message); } });
+    zone.addEventListener('drop', async (event) => { state.analysisError = null; try { await setUploadFile(zone.dataset.drop, event.dataTransfer.files[0]); app.innerHTML = renderDashboard(); bindPage(); } catch (error) { notify(error.message); } });
   });
   document.querySelectorAll('[data-version-reference]').forEach((input) => input.addEventListener('change', async () => {
     const modal = state.versionModal;
@@ -1545,6 +2890,7 @@ function bindPage() {
     });
   });
   bindObjectSelection();
+  bindMaterialSelectionCanvases();
   bindComparison();
   document.querySelectorAll('[data-category]').forEach((input) => input.addEventListener('change', () => { state.market.category = input.dataset.category; app.innerHTML = renderMarket(); bindPage(); }));
   document.querySelector('[data-price-range]')?.addEventListener('input', (event) => { state.market.maxPrice = Number(event.target.value); const output = document.querySelector('[data-range-output]'); if (output) output.textContent = `${money.format(state.market.maxPrice)}원`; refreshProductGrid(); });
@@ -1578,6 +2924,32 @@ window.addEventListener('keydown', (event) => {
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     }
     return;
+  }
+  if (state.uploadOpen && (event.key === 'Enter' || event.key === 'Escape')) {
+    const active = state.upload.activeSelection;
+    const assignment = active?.assignmentId ? findMaterialAssignment(active.assignmentId) : null;
+    const kind = active?.kind === 'swatch' ? 'swatch' : 'source';
+    if (assignment && lassoDraftFor(assignment, kind)) {
+      event.preventDefault();
+      if (event.key === 'Enter') {
+        completeLassoPath(assignment, kind, document.querySelector(kind === 'swatch' ? `[data-material-swatch-root='${assignment.id}']` : `[data-material-selection-root='${assignment.id}']`));
+      } else {
+        cancelLassoDraft(assignment, kind, document.querySelector(kind === 'swatch' ? `[data-material-swatch-root='${assignment.id}']` : `[data-material-selection-root='${assignment.id}']`));
+      }
+      return;
+    }
+  }
+  if (state.uploadOpen && (event.ctrlKey || event.metaKey)) {
+    const key = event.key.toLowerCase();
+    if (key === 'z' || key === 'y') {
+      const active = state.upload.activeSelection;
+      const assignment = active?.assignmentId ? findMaterialAssignment(active.assignmentId) : null;
+      if (assignment) {
+        event.preventDefault();
+        moveMaterialSelectionHistory(assignment, key === 'y' || event.shiftKey ? 1 : -1);
+        return;
+      }
+    }
   }
   if (event.key !== 'Escape') return;
   if (state.uploadOpen) { state.uploadOpen = false; document.body.classList.remove('modal-open'); app.innerHTML = renderDashboard(); bindPage(); restoreFocus(); }

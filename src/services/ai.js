@@ -126,8 +126,48 @@ export const MOIN_OBJECT_AWARE_INPAINTING_SYSTEM_PROMPT = [
   'Return exactly one full-frame high-resolution after image aligned to Input A.'
 ].join('\n');
 
+export const MOIN_TARGET_MATERIALS_PROMPT_VERSION = 'moin-target-material-transfer-v1';
+
+export const MOIN_TARGET_MATERIALS_SYSTEM_PROMPT = [
+  'Role: Moin final-result interior material transfer engine.',
+  '',
+  'Input A is the source space photo and is the absolute geometry lock.',
+  'Each named material image is mapped only to its named target surface.',
+  'When a material swatch mask is supplied, use only its white pixels as the usable texture sample and ignore black pixels.',
+  'When a target mask is supplied, white pixels in that mask are the only editable pixels; black pixels must remain unchanged.',
+  'Preserve camera, perspective, crop, walls, windows, doors, furniture positions, scale, lighting direction, and every non-target pixel.',
+  'Apply only the requested target surface appearance; never add, remove, move, resize, or restage objects.',
+  'Use perspective-aware texture mapping and preserve realistic shadows, highlights, seams, and contact shading.',
+  '',
+  'Return exactly one photorealistic full-frame final image only.',
+  'Do not return before/after, split-screen, collage, borders, text, labels, logos, watermark, dashboard, gauge, UI, or explanation.'
+].join('\n');
+
 function wait(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+const GEMINI_RETRYABLE_STATUSES = new Set([500, 502, 503, 504]);
+
+function positiveInteger(value, fallback, maximum = 12) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 1) return fallback;
+  return Math.min(Math.floor(parsed), maximum);
+}
+
+function nonNegativeInteger(value, fallback, maximum = 60000) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return Math.min(Math.floor(parsed), maximum);
+}
+
+function retryAfterMilliseconds(response) {
+  const value = response.headers?.get?.('retry-after');
+  if (!value) return 0;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, Math.floor(seconds * 1000));
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : 0;
 }
 
 function cleanText(value, fallback, maximum) {
@@ -292,11 +332,35 @@ function parseGeneratedImage(response) {
 export class MockAiProvider {
   constructor(delay = 450) { this.delay = delay; }
 
-  async analyze({ current, floorMaterial, wallMaterial, objectMaterial, mask, targetObject } = {}) {
+  async analyze({ current, floorMaterial, wallMaterial, objectMaterial, mask, targetObject, targetMaterials } = {}) {
     validateSourceImage(current, 'Current image');
+    const targetMaterialMode = Array.isArray(targetMaterials) && targetMaterials.length > 0;
     const objectMode = Boolean(objectMaterial || mask || targetObject);
     const materialMode = Boolean(floorMaterial || wallMaterial);
-    if (objectMode) {
+    if (targetMaterialMode) {
+      targetMaterials.forEach(({ target, image, mask, materialMask }) => {
+        if (typeof target !== 'string' || !target.trim()) throw new Error('Each material assignment needs a target');
+        validateSourceImage(image, `Material image for ${target}`);
+        if (mask) {
+          validateSourceImage(mask, `Mask image for ${target}`);
+          if (mask.mimeType !== 'image/png') throw new Error(`Mask image for ${target} must be PNG`);
+          const sourceDimensions = imageDimensions(current);
+          const maskDimensions = imageDimensions(mask);
+          if (sourceDimensions?.width && sourceDimensions?.height && (!maskDimensions || maskDimensions.width !== sourceDimensions.width || maskDimensions.height !== sourceDimensions.height)) {
+            throw new Error(`Mask image for ${target} must match the current image dimensions`);
+          }
+        }
+        if (materialMask) {
+          validateSourceImage(materialMask, `Material swatch mask for ${target}`);
+          if (materialMask.mimeType !== 'image/png') throw new Error(`Material swatch mask for ${target} must be PNG`);
+          const materialDimensions = imageDimensions(image);
+          const materialMaskDimensions = imageDimensions(materialMask);
+          if (materialDimensions?.width && materialDimensions?.height && (!materialMaskDimensions || materialMaskDimensions.width !== materialDimensions.width || materialMaskDimensions.height !== materialDimensions.height)) {
+            throw new Error(`Material swatch mask for ${target} must match the material image dimensions`);
+          }
+        }
+      });
+    } else if (objectMode) {
       if (!objectMaterial || !mask || typeof targetObject !== 'string' || !targetObject.trim()) {
         throw new Error('Object material, binary mask, and target object must be provided together');
       }
@@ -321,15 +385,16 @@ export class MockAiProvider {
       recommendedSlugs: [],
       estimate: DEFAULT_ESTIMATE,
       prompt: {
-        version: objectMode ? MOIN_OBJECT_AWARE_INPAINTING_PROMPT_VERSION : MOIN_INTERIOR_INPAINTING_PROMPT_VERSION,
-        inputMode: objectMode ? 'object-mask-material' : materialMode ? 'floor-wall-space' : 'space-reference',
+        version: targetMaterialMode ? MOIN_TARGET_MATERIALS_PROMPT_VERSION : objectMode ? MOIN_OBJECT_AWARE_INPAINTING_PROMPT_VERSION : MOIN_INTERIOR_INPAINTING_PROMPT_VERSION,
+        inputMode: targetMaterialMode ? 'target-materials-space' : objectMode ? 'object-mask-material' : materialMode ? 'floor-wall-space' : 'space-reference',
         targetObject: objectMode ? targetObject.trim().slice(0, 80) : null,
+        targetMaterials: targetMaterialMode ? targetMaterials.map(({ target }) => target) : undefined,
         structuralLock: true
       },
       transformation: {
-        mode: objectMode ? 'object-mask-source-preview' : 'source-preview',
+        mode: targetMaterialMode ? 'target-materials-source-preview' : objectMode ? 'object-mask-source-preview' : 'source-preview',
         geometryLocked: true,
-        maskLocked: objectMode,
+        maskLocked: objectMode || targetMaterialMode,
         appearanceApplied: false
       }
     };
@@ -337,10 +402,13 @@ export class MockAiProvider {
 }
 
 export class GeminiAiProvider {
-  constructor({ apiKey, textModel, imageModel }) {
+  constructor({ apiKey, textModel, imageModel, retryAttempts = 5, retryBaseMs = 1000, retryMaxMs = 15000 }) {
     this.apiKey = apiKey;
     this.textModel = textModel;
     this.imageModel = imageModel;
+    this.retryAttempts = positiveInteger(retryAttempts, 5);
+    this.retryBaseMs = nonNegativeInteger(retryBaseMs, 1000);
+    this.retryMaxMs = nonNegativeInteger(retryMaxMs, 15000);
   }
 
   async callModel(model, parts, generationConfig, systemInstruction = '') {
@@ -350,7 +418,7 @@ export class GeminiAiProvider {
       contents: [{ role: 'user', parts }],
       ...(generationConfig ? { generationConfig } : {})
     });
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    for (let attempt = 0; attempt < this.retryAttempts; attempt += 1) {
       let response;
       try {
         response = await fetch(endpoint, {
@@ -363,8 +431,8 @@ export class GeminiAiProvider {
           signal: AbortSignal.timeout(60000)
         });
       } catch (error) {
-        if (attempt === 2 || !['TimeoutError', 'TypeError'].includes(error.name)) throw error;
-        await wait(500 * (2 ** attempt));
+        if (attempt === this.retryAttempts - 1 || !['TimeoutError', 'TypeError'].includes(error.name)) throw error;
+        await wait(Math.min(this.retryMaxMs, this.retryBaseMs * (2 ** attempt)));
         continue;
       }
 
@@ -375,26 +443,58 @@ export class GeminiAiProvider {
       if (response.ok) return payload;
 
       const detail = cleanText(payload?.error?.message, '', 240);
-      if (![429, 500, 502, 503, 504].includes(response.status) || attempt === 2) {
+      const retryable = GEMINI_RETRYABLE_STATUSES.has(response.status);
+      if (!retryable || attempt === this.retryAttempts - 1) {
+        const modelLabel = model === this.imageModel ? '\uc774\ubbf8\uc9c0 \uc0dd\uc131' : '\uacf5\uac04 \ubd84\uc11d';
         const error = new Error(
           response.status === 429
             ? 'Gemini 이미지 생성 할당량이 부족합니다. Google AI Studio에서 결제와 할당량을 확인한 뒤 다시 시도해주세요.'
-            : `Gemini request failed (${response.status})${detail ? `: ${detail}` : ''}`
+            : response.status === 503
+              ? `Gemini ${modelLabel} \uc11c\ubc84\uac00 \ud604\uc7ac \ud63c\uc7a1\ud569\ub2c8\ub2e4 (503). \uc7a0\uc2dc \ud6c4 \ub2e4\uc2dc \uc2dc\ub3c4\ud574\uc8fc\uc138\uc694.`
+              : response.status >= 500
+                ? `Gemini ${modelLabel} \uc11c\ubc84\uc5d0 \uc77c\uc2dc\uc801\uc778 \ubb38\uc81c\uac00 \ubc1c\uc0dd\ud588\uc2b5\ub2c8\ub2e4 (${response.status}). \uc7a0\uc2dc \ud6c4 \ub2e4\uc2dc \uc2dc\ub3c4\ud574\uc8fc\uc138\uc694.`
+                : `Gemini request failed (${response.status})${detail ? `: ${detail}` : ''}`
         );
         error.status = response.status;
         error.code = response.status === 429 ? 'GEMINI_QUOTA_EXCEEDED' : 'GEMINI_REQUEST_FAILED';
+        error.providerDetail = detail || undefined;
         throw error;
       }
-      await wait(500 * (2 ** attempt));
+      const exponentialDelay = Math.min(this.retryMaxMs, this.retryBaseMs * (2 ** attempt));
+      await wait(Math.max(exponentialDelay, retryAfterMilliseconds(response)));
     }
     throw new Error('Gemini request failed after retries');
   }
 
-  async analyze({ current, reference, floorMaterial, wallMaterial, objectMaterial, mask, targetObject }) {
+  async analyze({ current, reference, floorMaterial, wallMaterial, objectMaterial, mask, targetObject, targetMaterials }) {
     validateSourceImage(current, 'Current image');
+    const targetMaterialMode = Array.isArray(targetMaterials) && targetMaterials.length > 0;
     const objectMode = Boolean(objectMaterial || mask || targetObject);
     const materialMode = Boolean(floorMaterial || wallMaterial);
-    if (objectMode) {
+    if (targetMaterialMode) {
+      targetMaterials.forEach(({ target, image, mask, materialMask }) => {
+        if (typeof target !== 'string' || !target.trim()) throw new Error('Each material assignment needs a target');
+        validateSourceImage(image, `Material image for ${target}`);
+        if (mask) {
+          validateSourceImage(mask, `Mask image for ${target}`);
+          if (mask.mimeType !== 'image/png') throw new Error(`Mask image for ${target} must be PNG`);
+          const sourceDimensions = imageDimensions(current);
+          const maskDimensions = imageDimensions(mask);
+          if (sourceDimensions?.width && sourceDimensions?.height && (!maskDimensions || maskDimensions.width !== sourceDimensions.width || maskDimensions.height !== sourceDimensions.height)) {
+            throw new Error(`Mask image for ${target} must match the current image dimensions`);
+          }
+        }
+        if (materialMask) {
+          validateSourceImage(materialMask, `Material swatch mask for ${target}`);
+          if (materialMask.mimeType !== 'image/png') throw new Error(`Material swatch mask for ${target} must be PNG`);
+          const materialDimensions = imageDimensions(image);
+          const materialMaskDimensions = imageDimensions(materialMask);
+          if (materialDimensions?.width && materialDimensions?.height && (!materialMaskDimensions || materialMaskDimensions.width !== materialDimensions.width || materialMaskDimensions.height !== materialDimensions.height)) {
+            throw new Error(`Material swatch mask for ${target} must match the material image dimensions`);
+          }
+        }
+      });
+    } else if (objectMode) {
       if (!objectMaterial || !mask || typeof targetObject !== 'string' || !targetObject.trim()) {
         throw new Error('Object material, binary mask, and target object must be provided together');
       }
@@ -449,12 +549,40 @@ recommendedSlugs may only contain: premium-wallpaper, oak-flooring, cream-tile, 
       'Keys: summary, style, palette (exactly 3), recommendedSlugs, geometrySummary, objectMaterialMappings.',
       'recommendedSlugs may only contain: premium-wallpaper, oak-flooring, cream-tile, eco-paint, sample-paint.'
     ].join('\n');
-    const effectiveAnalysisPrompt = objectMode
+    const targetMaterialsAnalysisPrompt = [
+      'Return Korean JSON only. This is target-specific material transfer, not a redesign.',
+      'INPUT A is the immutable source space photo and geometry lock.',
+      ...(targetMaterials || []).map(({ target, mask, materialMask }, index) => `INPUT B${index + 1} is the material swatch assigned only to target "${target}"${materialMask ? '; its swatch mask limits the usable sample to white pixels.' : ''}${mask ? ' The following source mask makes white pixels the only editable target area.' : '.'}`),
+      'Map each swatch only to its named target surface. Preserve every other object, surface, camera, perspective, crop, position, scale, lighting direction, and shadow.',
+      'Return a plan for the final result image only. Do not introduce unrequested furniture, objects, text, collage, split screen, or UI.',
+      'Keys: summary, style, palette (exactly 3), recommendedSlugs, geometrySummary, objectMaterialMappings.',
+      'recommendedSlugs may only contain: premium-wallpaper, oak-flooring, cream-tile, eco-paint, sample-paint.'
+    ].join('\n');
+    const effectiveAnalysisPrompt = targetMaterialMode
+      ? targetMaterialsAnalysisPrompt
+      : objectMode
       ? objectAnalysisPrompt
       : materialMode
         ? materialAnalysisPrompt
         : analysisPrompt;
-    const imageParts = objectMode
+    const imageParts = targetMaterialMode
+      ? [
+          { text: 'INPUT A — SOURCE_SPACE_GEOMETRY_LOCK (preserve the complete source composition)' },
+          { inlineData: { mimeType: current.mimeType, data: current.base64 } },
+          ...(targetMaterials || []).flatMap(({ target, image, mask, materialMask }, index) => [
+            { text: `INPUT B${index + 1} — TARGET MATERIAL FOR: ${target} (apply only to this named target)` },
+            { inlineData: { mimeType: image.mimeType, data: image.base64 } },
+            ...(materialMask ? [
+              { text: `INPUT MATERIAL MASK ${index + 1} - WHITE PIXELS ARE THE ONLY USABLE SWATCH AREA FOR: ${target}` },
+              { inlineData: { mimeType: materialMask.mimeType, data: materialMask.base64 } }
+            ] : []),
+            ...(mask ? [
+              { text: `INPUT MASK ${index + 1} - WHITE PIXELS ARE THE ONLY EDITABLE PART OF TARGET: ${target}` },
+              { inlineData: { mimeType: mask.mimeType, data: mask.base64 } }
+            ] : [])
+          ])
+        ]
+      : objectMode
       ? [
           { text: 'INPUT A — SOURCE_SPACE_STRUCTURE_LOCK (authoritative source; preserve all geometry and non-target pixels)' },
           { inlineData: { mimeType: current.mimeType, data: current.base64 } },
@@ -481,7 +609,7 @@ recommendedSlugs may only contain: premium-wallpaper, oak-flooring, cream-tile, 
     const textResponse = await this.callModel(this.textModel, [{ text: effectiveAnalysisPrompt }, ...imageParts], {
       responseMimeType: 'application/json',
       responseSchema: ANALYSIS_SCHEMA
-    }, objectMode ? MOIN_OBJECT_AWARE_INPAINTING_SYSTEM_PROMPT : MOIN_INTERIOR_INPAINTING_SYSTEM_PROMPT);
+    }, targetMaterialMode ? MOIN_TARGET_MATERIALS_SYSTEM_PROMPT : objectMode ? MOIN_OBJECT_AWARE_INPAINTING_SYSTEM_PROMPT : MOIN_INTERIOR_INPAINTING_SYSTEM_PROMPT);
     const analysis = parseAnalysisResponse(textResponse);
     const mappingPlan = analysis.objectMaterialMappings.map((item) => (
       `- ${item.object}: ${item.targetMaterial}; ${item.targetColor}; lighting: ${item.lightingEffect}`
@@ -560,7 +688,25 @@ Output requirements:
       '- Return one full-frame after image aligned to Input A, suitable for a before/after overlay.',
       '- No split screen, collage, borders, captions, labels, text, logos, watermarks, DIY value gauges, dashboards, or UI.'
     ].join('\n');
-    const effectiveRenderPrompt = objectMode
+    const targetMaterialsRenderPrompt = [
+      'Create ONE clean, high-resolution, photorealistic final interior image only. This is target-specific material inpainting, never a redesign.',
+      'INPUT A (first attached image) is the immutable SOURCE SPACE / GEOMETRY LOCK. Preserve its exact camera, perspective, crop, architecture, windows, doors, furniture, decor, object count, positions, scale, depth order, occlusions, lighting direction, and all non-target pixels.',
+      ...(targetMaterials || []).map(({ target, mask, materialMask }, index) => `INPUT B${index + 1} is the material swatch assigned ONLY to target "${target}". Apply its colour, texture, pattern, scale, reflectance, and finish only to that named target${materialMask ? ' and use its material mask as the only usable swatch sample.' : ''}${mask ? ' Use the matching source mask so white pixels are the only editable target pixels.' : '.'}`),
+      'Do not let any target material leak onto other surfaces. Do not add, remove, replace, move, rotate, resize, or restage anything.',
+      '',
+      'Locked geometry summary:',
+      analysis.geometrySummary,
+      '',
+      'Object-by-object appearance plan:',
+      mappingPlan,
+      '',
+      'Use source lighting to create realistic shadows, highlights, seams, contact shading, and ambient bounce on the requested targets.',
+      'Return exactly one full-frame final image aligned to Input A.',
+      'No before/after, split screen, collage, borders, captions, labels, text, logos, watermarks, gauges, dashboards, UI, or explanation.'
+    ].join('\n');
+    const effectiveRenderPrompt = targetMaterialMode
+      ? targetMaterialsRenderPrompt
+      : objectMode
       ? objectRenderPrompt
       : materialMode
         ? materialRenderPrompt
@@ -570,7 +716,7 @@ Output requirements:
     // field for both Nano Banana and Nano Banana 2, so keep this request to the
     // one portable output-modality setting.
     const imageGenerationConfig = { responseModalities: ['IMAGE'] };
-    const imageResponse = await this.callModel(this.imageModel, [{ text: effectiveRenderPrompt }, ...imageParts], imageGenerationConfig, objectMode ? MOIN_OBJECT_AWARE_INPAINTING_SYSTEM_PROMPT : MOIN_INTERIOR_INPAINTING_SYSTEM_PROMPT);
+    const imageResponse = await this.callModel(this.imageModel, [{ text: effectiveRenderPrompt }, ...imageParts], imageGenerationConfig, targetMaterialMode ? MOIN_TARGET_MATERIALS_SYSTEM_PROMPT : objectMode ? MOIN_OBJECT_AWARE_INPAINTING_SYSTEM_PROMPT : MOIN_INTERIOR_INPAINTING_SYSTEM_PROMPT);
     return {
       provider: 'gemini',
       previewOnly: false,
@@ -578,15 +724,16 @@ Output requirements:
       ...analysis,
       estimate: DEFAULT_ESTIMATE,
       prompt: {
-        version: objectMode ? MOIN_OBJECT_AWARE_INPAINTING_PROMPT_VERSION : MOIN_INTERIOR_INPAINTING_PROMPT_VERSION,
-        inputMode: objectMode ? 'object-mask-material' : materialMode ? 'floor-wall-space' : 'space-reference',
+        version: targetMaterialMode ? MOIN_TARGET_MATERIALS_PROMPT_VERSION : objectMode ? MOIN_OBJECT_AWARE_INPAINTING_PROMPT_VERSION : MOIN_INTERIOR_INPAINTING_PROMPT_VERSION,
+        inputMode: targetMaterialMode ? 'target-materials-space' : objectMode ? 'object-mask-material' : materialMode ? 'floor-wall-space' : 'space-reference',
         targetObject: objectMode ? selectedObjectLabel : null,
+        targetMaterials: targetMaterialMode ? targetMaterials.map(({ target }) => target) : undefined,
         structuralLock: true
       },
       transformation: {
-        mode: objectMode ? 'object-aware-mask-material-transfer' : 'structure-locked-appearance-transfer',
+        mode: targetMaterialMode ? 'target-materials-appearance-transfer' : objectMode ? 'object-aware-mask-material-transfer' : 'structure-locked-appearance-transfer',
         geometryLocked: true,
-        maskLocked: objectMode,
+        maskLocked: objectMode || targetMaterialMode,
         appearanceApplied: true,
         aspectRatio
       },
@@ -600,7 +747,14 @@ export function createAiProvider(env = globalThis.process?.env || {}) {
   if (provider === 'gemini') {
     const missing = ['GEMINI_API_KEY', 'GEMINI_TEXT_MODEL', 'GEMINI_IMAGE_MODEL'].filter((key) => !env[key]);
     if (missing.length) throw new Error(`Gemini configuration is incomplete: ${missing.join(', ')}`);
-    return new GeminiAiProvider({ apiKey: env.GEMINI_API_KEY, textModel: env.GEMINI_TEXT_MODEL, imageModel: env.GEMINI_IMAGE_MODEL });
+    return new GeminiAiProvider({
+      apiKey: env.GEMINI_API_KEY,
+      textModel: env.GEMINI_TEXT_MODEL,
+      imageModel: env.GEMINI_IMAGE_MODEL,
+      retryAttempts: env.GEMINI_RETRY_ATTEMPTS,
+      retryBaseMs: env.GEMINI_RETRY_BASE_MS,
+      retryMaxMs: env.GEMINI_RETRY_MAX_MS
+    });
   }
   if (provider !== 'mock') throw new Error(`Unsupported AI_PROVIDER: ${provider}`);
   return new MockAiProvider(Number(env.AI_MOCK_DELAY_MS || 450));

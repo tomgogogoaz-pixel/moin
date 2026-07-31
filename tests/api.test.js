@@ -16,7 +16,7 @@ let failNextAnalysis = false;
 let quotaNextAnalysis = false;
 
 const immediateAi = {
-  async analyze({ objectMaterial, mask, targetObject } = {}) {
+  async analyze({ objectMaterial, mask, targetObject, targetMaterials } = {}) {
     if (quotaNextAnalysis) {
       quotaNextAnalysis = false;
       const error = new Error('Gemini 이미지 생성 할당량이 부족합니다. Google AI Studio에서 결제와 할당량을 확인한 뒤 다시 시도해주세요.');
@@ -28,6 +28,7 @@ const immediateAi = {
       failNextAnalysis = false;
       throw new Error('deliberate provider failure');
     }
+    const targetMaterialMode = Array.isArray(targetMaterials) && targetMaterials.length > 0;
     const objectMode = Boolean(objectMaterial || mask || targetObject);
     return {
       provider: 'test',
@@ -38,7 +39,20 @@ const immediateAi = {
       palette: ['화이트', '오크', '세이지'],
       recommendedSlugs: ['premium-wallpaper'],
       estimate: { total: 2520000, savingsRate: 92 },
-      ...(objectMode ? {
+      ...(targetMaterialMode ? {
+        prompt: {
+          version: 'moin-target-material-transfer-v1',
+          inputMode: 'target-materials-space',
+          targetMaterials: targetMaterials.map(({ target, mask: targetMask }) => ({ target, mask: Boolean(targetMask) })),
+          structuralLock: true
+        },
+        transformation: {
+          mode: 'target-materials-appearance-transfer',
+          geometryLocked: true,
+          maskLocked: targetMaterials.every(({ mask: targetMask }) => Boolean(targetMask)),
+          appearanceApplied: true
+        }
+      } : objectMode ? {
         prompt: {
           version: 'moin-object-aware-inpainting-v1',
           inputMode: 'object-mask-material',
@@ -379,6 +393,74 @@ test('object material generation persists a same-size binary mask and target met
   assert.equal(deleted.response.status, 200);
   assert.equal(fs.existsSync(stored.object_material_image_path), false);
   assert.equal(fs.existsSync(stored.object_mask_image_path), false);
+});
+
+test('GET analyze endpoint is not mistaken for a project id', async () => {
+  const result = await request('/api/v1/projects/analyze');
+  assert.equal(result.response.status, 405);
+  assert.equal(result.json.error.code, 'METHOD_NOT_ALLOWED');
+});
+
+test('target material generation persists one mask per selected target', async () => {
+  const generated = await request('/api/v1/projects/analyze', {
+    method: 'POST',
+    body: {
+      currentImage: onePixelPng,
+      materialAssignments: [
+        { target: 'ceiling', image: onePixelPng, mask: onePixelPng, selection: { x: 0, y: 0, width: 1, height: 0.2, unit: 'normalized' } },
+        { target: 'floor', image: onePixelPng, mask: onePixelPng, selection: { x: 0, y: 0.8, width: 1, height: 0.2, unit: 'normalized' } }
+      ]
+    }
+  });
+  assert.equal(generated.response.status, 201);
+  const project = generated.json.data.project;
+  assert.equal(project.analysis.prompt.inputMode, 'target-materials-space');
+  assert.deepEqual(project.analysis.prompt.targetMaterials, [
+    { target: 'ceiling', mask: true },
+    { target: 'floor', mask: true }
+  ]);
+  assert.equal(project.analysis.transformation.maskLocked, true);
+  const stored = server.moin.db.prepare('SELECT analysis_json FROM projects WHERE id = ?').get(project.id);
+  const analysis = JSON.parse(stored.analysis_json);
+  assert.equal(analysis.materialInputPaths.length, 4);
+  assert.ok(analysis.materialInputPaths.every((filename) => fs.existsSync(filename)));
+
+  const composited = await request(`/api/v1/projects/${project.id}/after`, {
+    method: 'POST',
+    body: { afterImage: onePixelPng }
+  });
+  assert.equal(composited.response.status, 200);
+  assert.equal(composited.json.data.project.analysis.transformation.clientComposite, true);
+
+  const deleted = await request(`/api/v1/projects/${project.id}`, { method: 'DELETE' });
+  assert.equal(deleted.response.status, 200);
+  assert.ok(analysis.materialInputPaths.every((filename) => !fs.existsSync(filename)));
+});
+
+test('target material generation accepts a partial material swatch mask', async () => {
+  const generated = await request('/api/v1/projects/analyze', {
+    method: 'POST',
+    body: {
+      currentImage: onePixelPng,
+      materialAssignments: [
+        {
+          target: 'floor',
+          image: onePixelPng,
+          mask: onePixelPng,
+          materialMask: onePixelPng,
+          selection: { x: 0, y: 0.8, width: 1, height: 0.2, mode: 'magic-wand', unit: 'normalized' }
+        }
+      ]
+    }
+  });
+  assert.equal(generated.response.status, 201);
+  const project = generated.json.data.project;
+  assert.equal(project.analysis.targetMaterials[0].maskApplied, true);
+  assert.equal(project.analysis.targetMaterials[0].materialMaskApplied, true);
+  const stored = server.moin.db.prepare('SELECT analysis_json FROM projects WHERE id = ?').get(project.id);
+  const analysis = JSON.parse(stored.analysis_json);
+  assert.equal(analysis.materialInputPaths.length, 3);
+  assert.ok(analysis.materialInputPaths.every((filename) => fs.existsSync(filename)));
 });
 
 test('deleting an owned project removes its record and managed uploaded media', async () => {
