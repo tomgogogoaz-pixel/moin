@@ -350,7 +350,7 @@ function renderLanding() {
     ${state.mobileMenu ? `<nav class='mobile-menu' aria-label='모바일 주 메뉴'>${mobilePublicNavigation}</nav>` : ''}
     <section class='landing-hero' aria-labelledby='hero-title'>
       ${mainHeroVideo()}
-      <div class='hero-copy'><h1 id='hero-title'><span class='hero-title-kicker'>사진 두 장에서 시작되는</span><span class='hero-title-main'>솔직하고 투명한<br>공간의 기록</span></h1><button type='button' class='button hero-cta' data-action='start' aria-label='무료 체험 시작하기'><span class='hero-cta-copy'><span class='hero-cta-title'>Start</span></span><span class='hero-cta-arrow' aria-hidden='true'>→</span></button></div>
+      <div class='hero-copy'><h1 id='hero-title'><span class='hero-title-kicker'>사진 두 장에서 시작되는</span><span class='hero-title-main'>솔직하고 투명한<br>공간의 기록</span></h1><button type='button' class='button hero-cta' data-action='start' aria-label='무료 체험 시작하기'><span class='hero-cta-copy'><span class='hero-cta-title'>Start</span></span><span class='hero-cta-arrow' aria-hidden='true'>›</span></button></div>
     </section>
     ${serviceSection()}
   </main>`;
@@ -780,7 +780,7 @@ function legacyUploadModal() {
 function renderDashboard() {
   setDocument('홈', state.uploadOpen || state.dialog ? 'modal-open' : '');
   return `<main class='app-page dashboard-legacy-page'>${desktopHeader('home')}${mobileHeader({ house: true })}
-    <section class='landing-hero dashboard-legacy-hero' aria-labelledby='dashboard-home-title'>${mainHeroVideo()}<div class='hero-copy'><h1 id='dashboard-home-title'><span class='hero-title-kicker'>사진 두 장에서 시작되는</span><span class='hero-title-main'>솔직하고 투명한<br>공간의 기록</span></h1><button type='button' class='button hero-cta' data-action='open-upload' aria-label='무료 체험 시작하기'><span class='hero-cta-copy'><span class='hero-cta-title'>Start</span></span><span class='hero-cta-arrow' aria-hidden='true'>→</span></button></div></section>
+    <section class='landing-hero dashboard-legacy-hero' aria-labelledby='dashboard-home-title'>${mainHeroVideo()}<div class='hero-copy'><h1 id='dashboard-home-title'><span class='hero-title-kicker'>사진 두 장에서 시작되는</span><span class='hero-title-main'>솔직하고 투명한<br>공간의 기록</span></h1><button type='button' class='button hero-cta' data-action='open-upload' aria-label='무료 체험 시작하기'><span class='hero-cta-copy'><span class='hero-cta-title'>Start</span></span><span class='hero-cta-arrow' aria-hidden='true'>›</span></button></div></section>
     ${serviceSection({ signedIn: true })}${bottomNav('home')}${uploadModal()}${dialogMarkup()}</main>`;
 }
 
