@@ -174,8 +174,8 @@ function icon(name, className = '') {
   return `<svg ${common}>${paths[name] || ''}</svg>`;
 }
 
-function houseLogo(compact = false) {
-  return `<a class='app-logo' href='/dashboard' data-link aria-label='Moin 홈'>
+function houseLogo(compact = false, href = '/dashboard') {
+  return `<a class='app-logo' href='${href}' data-link aria-label='Moin 홈'>
     <svg viewBox='0 0 54 54' fill='none' aria-hidden='true'><circle class='dot' cx='9' cy='7' r='3' fill='#A86030' fill-opacity='.6'/><path d='m7 22 20-14 20 14M12 19v27h30V19M22 46V31h11v15' stroke='currentColor' stroke-width='2'/></svg>
     <span${compact ? ` style='font-size:24px'` : ''}>Moin</span>
   </a>`;
@@ -343,7 +343,7 @@ function renderLanding() {
   const mobilePublicNavigation = ANONYMOUS_NAV.map(({ href, key, label }) => `<a href='${href}' data-link ${key === 'home' ? `aria-current='page'` : ''}>${label}${key === 'login' ? ' →' : ''}</a>`).join('');
   return `<main class='landing-page'>
     <header class='landing-header'><div class='landing-header-inner'>
-      <a class='wordmark' href='/' data-link>Moin</a>
+      ${houseLogo(false, '/')}
       <nav class='landing-nav' aria-label='주 메뉴'>${publicNavigation}</nav>
       <button class='icon-button mobile-menu-button' data-action='toggle-mobile-menu' aria-expanded='${state.mobileMenu}' aria-label='메뉴'>${icon('menu', 'house-mark')}</button>
     </div></header>
