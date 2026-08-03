@@ -19,6 +19,18 @@ export const DASHBOARD_SECTION_ORDER = Object.freeze([
   'tools'
 ]);
 
+export const MATERIAL_SELECTION_TOOLS = Object.freeze([
+  Object.freeze({ id: 'object-select', label: '객체 선택 도구' }),
+  Object.freeze({ id: 'quick-select', label: '빠른 선택 도구' }),
+  Object.freeze({ id: 'magic-wand', label: '마술봉 도구' }),
+  Object.freeze({ id: 'lasso', label: '다각형 올가미 (점 연결)' })
+]);
+
+export function normalizeMaterialSelectionTool(value) {
+  if (value === 'freehand') return 'quick-select';
+  return MATERIAL_SELECTION_TOOLS.some(({ id }) => id === value) ? value : 'object-select';
+}
+
 export function selectRecentProjects(projects) {
   if (!Array.isArray(projects)) return [];
   return projects

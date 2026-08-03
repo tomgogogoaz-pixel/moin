@@ -4,6 +4,8 @@ import {
   ANONYMOUS_NAV,
   AUTHENTICATED_NAV,
   DASHBOARD_SECTION_ORDER,
+  MATERIAL_SELECTION_TOOLS,
+  normalizeMaterialSelectionTool,
   selectRecentProjects
 } from '../public/ui-model.js';
 
@@ -39,4 +41,15 @@ test('dashboard sections and recent projects are deterministic', () => {
     { id: 'second', updatedAt: '2026-03-01T00:00:00.000Z' }
   ];
   assert.deepEqual(selectRecentProjects(projects).map(({ id }) => id), ['newest', 'second', 'third']);
+});
+
+test('material selection exposes the Photoshop-style tool set and preserves the polygon lasso', () => {
+  assert.deepEqual(MATERIAL_SELECTION_TOOLS.map(({ id, label }) => ({ id, label })), [
+    { id: 'object-select', label: '객체 선택 도구' },
+    { id: 'quick-select', label: '빠른 선택 도구' },
+    { id: 'magic-wand', label: '마술봉 도구' },
+    { id: 'lasso', label: '다각형 올가미 (점 연결)' }
+  ]);
+  assert.equal(normalizeMaterialSelectionTool('freehand'), 'quick-select');
+  assert.equal(normalizeMaterialSelectionTool('unknown'), 'object-select');
 });

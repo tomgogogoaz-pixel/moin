@@ -8,6 +8,8 @@ import {
   MOIN_INTERIOR_INPAINTING_SYSTEM_PROMPT,
   MOIN_OBJECT_AWARE_INPAINTING_PROMPT_VERSION,
   MOIN_OBJECT_AWARE_INPAINTING_SYSTEM_PROMPT,
+  MOIN_TARGET_MATERIALS_PROMPT_VERSION,
+  MOIN_TARGET_MATERIALS_SYSTEM_PROMPT,
   pickNearestAspectRatio
 } from '../src/services/ai.js';
 
@@ -31,12 +33,21 @@ test('interior inpainting system prompt fixes structural, floor, and wall respon
   assert.match(MOIN_INTERIOR_INPAINTING_SYSTEM_PROMPT, /The server, not the model, owns version history/);
 });
 
-test('object-aware inpainting prompt locks everything outside the binary mask', () => {
-  assert.equal(MOIN_OBJECT_AWARE_INPAINTING_PROMPT_VERSION, 'moin-object-aware-inpainting-v1');
+test('object-aware inpainting prompt treats the mask as a maximum ROI and preserves occlusion', () => {
+  assert.equal(MOIN_OBJECT_AWARE_INPAINTING_PROMPT_VERSION, 'moin-object-aware-inpainting-v2');
   assert.match(MOIN_OBJECT_AWARE_INPAINTING_SYSTEM_PROMPT, /Input A is the absolute structural skeleton/);
-  assert.match(MOIN_OBJECT_AWARE_INPAINTING_SYSTEM_PROMPT, /White pixels are the only editable target region/);
+  assert.match(MOIN_OBJECT_AWARE_INPAINTING_SYSTEM_PROMPT, /maximum editable ROI/);
   assert.match(MOIN_OBJECT_AWARE_INPAINTING_SYSTEM_PROMPT, /black pixels are immutable background/);
+  assert.match(MOIN_OBJECT_AWARE_INPAINTING_SYSTEM_PROMPT, /objects in front.*source-locked/);
+  assert.match(MOIN_OBJECT_AWARE_INPAINTING_SYSTEM_PROMPT, /visible silhouette/);
   assert.match(MOIN_OBJECT_AWARE_INPAINTING_SYSTEM_PROMPT, /DIY value gauges/);
+});
+
+test('multi-material prompt preserves foreground occluders inside broad surface ROIs', () => {
+  assert.equal(MOIN_TARGET_MATERIALS_PROMPT_VERSION, 'moin-target-material-transfer-v2');
+  assert.match(MOIN_TARGET_MATERIALS_SYSTEM_PROMPT, /maximum editable ROI/);
+  assert.match(MOIN_TARGET_MATERIALS_SYSTEM_PROMPT, /Preserve all foreground occluders/);
+  assert.match(MOIN_TARGET_MATERIALS_SYSTEM_PROMPT, /edit only the visible target silhouette/);
 });
 
 test('explicit Gemini mode fails fast when server configuration is incomplete', () => {
@@ -276,7 +287,7 @@ test('Gemini object inpainting sends source, binary mask, and material in strict
   assert.match(calls[0].parts[5].text, /INPUT C/);
   assert.match(calls[0].systemInstruction, /OBJECT-AWARE TEXTURE TRANSFER/);
   assert.match(calls[1].parts[0].text, /Never alter any black-mask pixel/);
-  assert.match(calls[1].systemInstruction, /BINARY TARGET MASK/);
+  assert.match(calls[1].systemInstruction, /BINARY TARGET ROI MASK/);
 });
 
 test('Gemini target-material mode sends the selected material swatch mask', async () => {

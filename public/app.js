@@ -1,4 +1,11 @@
-import { ANONYMOUS_NAV, AUTHENTICATED_NAV, DASHBOARD_SECTION_ORDER, selectRecentProjects } from './ui-model.js';
+import {
+  ANONYMOUS_NAV,
+  AUTHENTICATED_NAV,
+  DASHBOARD_SECTION_ORDER,
+  MATERIAL_SELECTION_TOOLS,
+  normalizeMaterialSelectionTool,
+  selectRecentProjects
+} from './ui-model.js';
 
 const app = document.querySelector('#app');
 
@@ -53,14 +60,18 @@ function createMaterialAssignment(target = 'wall') {
     maskStrokes: [],
     maskPaths: [],
     lassoDraft: null,
+    objectDraft: null,
+    quickDraft: null,
     autoMask: null,
     selectionTouched: false,
-    selectionMode: 'magic-wand',
+    selectionMode: 'object-select',
     wandTolerance: 18,
     brushSize: 10,
     materialMaskStrokes: [],
     materialMaskPaths: [],
     materialLassoDraft: null,
+    materialObjectDraft: null,
+    materialQuickDraft: null,
     materialAutoMask: null,
     materialSelectionMode: 'magic-wand',
     materialWandTolerance: 18,
@@ -82,6 +93,7 @@ const OBJECT_TARGETS = Object.freeze([
 
 const state = {
   user: undefined,
+  authLocale: 'ko',
   mobileMenu: false,
   uploadOpen: false,
   analyzing: false,
@@ -100,6 +112,142 @@ const state = {
   dialog: null,
   focusReturnSelector: null
 };
+
+const AUTH_LOCALE_STORAGE_KEY = 'moin.auth-locale';
+const AUTH_LOCALES = Object.freeze({
+  ko: Object.freeze({
+    languageLabel: '언어 선택',
+    visualTitle: '사진 2장으로 마주하는<br>투명한 공간의 기록',
+    visualBody: '공간의 변화, 자재와 시공의 모든 과정을<br>더 쉽고 투명하게 기록하고 관리하세요.',
+    benefits: [
+      ['사진 2장만으로', '공간 기록 시작'],
+      ['투명한 정보 관리', '신뢰할 수 있는 기록'],
+      ['AI 추천으로', '최적의 선택']
+    ],
+    trust: [
+      ['shield', '안전한 데이터 보호', '최신 보안 시스템 적용'],
+      ['user', '전문가와 함께', '신뢰할 수 있는 매칭'],
+      ['home', '언제 어디서나', '모든 기기에서 사용 가능'],
+      ['refresh', '지속적인 업데이트', '더 나은 서비스 제공']
+    ],
+    login: Object.freeze({
+      documentTitle: '로그인',
+      heading: '환영합니다!',
+      subtitle: 'Moin에 로그인하고<br>나만의 공간 기록을 시작하세요.',
+      emailPlaceholder: '이메일 주소',
+      passwordPlaceholder: '비밀번호',
+      showPassword: '비밀번호 보기',
+      remember: '로그인 상태 유지',
+      forgot: '비밀번호 찾기',
+      submit: '로그인',
+      divider: '또는',
+      google: 'Google로 로그인',
+      kakao: '카카오로 로그인',
+      apple: 'Apple로 로그인',
+      switchLead: '계정이 없으신가요?',
+      switchLink: '회원가입'
+    }),
+    signup: Object.freeze({
+      documentTitle: '회원가입',
+      heading: '회원가입',
+      subtitle: '간단한 정보로 나만의 공간 기록을 시작하세요.',
+      nameLabel: '이름',
+      namePlaceholder: '이름을 입력해주세요',
+      emailLabel: '이메일',
+      emailPlaceholder: '이메일 주소',
+      passwordLabel: '비밀번호',
+      passwordPlaceholder: '8자 이상 입력해주세요',
+      confirmLabel: '비밀번호 확인',
+      confirmPlaceholder: '비밀번호를 다시 입력해주세요',
+      allTerms: '약관 전체 동의',
+      terms: '(필수) 서비스 이용약관 동의',
+      privacy: '(필수) 개인정보 처리방침 동의',
+      marketing: '(선택) 혜택 알림 수신 동의',
+      submit: '회원가입 완료',
+      switchLead: '이미 계정이 있으신가요?',
+      switchLink: '로그인하기'
+    }),
+    forgotNotice: '비밀번호 재설정 메일 기능은 인증 서비스 연동 후 활성화됩니다.',
+    socialUnavailable: '로그인은 키 연동 후 활성화됩니다.'
+  }),
+  en: Object.freeze({
+    languageLabel: 'Choose language',
+    visualTitle: 'A transparent record<br>of your space, from two photos',
+    visualBody: 'Keep every step of your space transformation,<br>materials, and construction clear and organized.',
+    benefits: [
+      ['Start with two photos', 'Create a space record'],
+      ['Clear information', 'A record you can trust'],
+      ['AI recommendations', 'Make confident choices']
+    ],
+    trust: [
+      ['shield', 'Protected data', 'Modern security standards'],
+      ['user', 'Expert support', 'Trusted matching'],
+      ['home', 'Available anywhere', 'Works on every device'],
+      ['refresh', 'Always improving', 'Updates for a better service']
+    ],
+    login: Object.freeze({
+      documentTitle: 'Login',
+      heading: 'Welcome back!',
+      subtitle: 'Sign in to Moin and<br>start recording your space.',
+      emailPlaceholder: 'Email address',
+      passwordPlaceholder: 'Password',
+      showPassword: 'Show password',
+      remember: 'Keep me signed in',
+      forgot: 'Forgot password?',
+      submit: 'Log in',
+      divider: 'or',
+      google: 'Continue with Google',
+      kakao: 'Continue with Kakao',
+      apple: 'Continue with Apple',
+      switchLead: 'New to Moin?',
+      switchLink: 'Create an account'
+    }),
+    signup: Object.freeze({
+      documentTitle: 'Create account',
+      heading: 'Create your account',
+      subtitle: 'Start recording your space with a few simple details.',
+      nameLabel: 'Name',
+      namePlaceholder: 'Enter your name',
+      emailLabel: 'Email',
+      emailPlaceholder: 'Email address',
+      passwordLabel: 'Password',
+      passwordPlaceholder: 'Use at least 8 characters',
+      confirmLabel: 'Confirm password',
+      confirmPlaceholder: 'Enter your password again',
+      allTerms: 'Agree to all terms',
+      terms: '(Required) Agree to the Terms of Service',
+      privacy: '(Required) Agree to the Privacy Policy',
+      marketing: '(Optional) Receive product updates',
+      submit: 'Create account',
+      switchLead: 'Already have an account?',
+      switchLink: 'Log in'
+    }),
+    forgotNotice: 'Password reset email will be available after the authentication service is connected.',
+    socialUnavailable: 'sign-in will be available after the provider key is connected.'
+  })
+});
+
+state.authLocale = readStoredAuthLocale();
+
+function readStoredAuthLocale() {
+  try {
+    const locale = localStorage.getItem(AUTH_LOCALE_STORAGE_KEY);
+    return Object.hasOwn(AUTH_LOCALES, locale) ? locale : 'ko';
+  } catch {
+    return 'ko';
+  }
+}
+
+function authCopy() {
+  return AUTH_LOCALES[state.authLocale] || AUTH_LOCALES.ko;
+}
+
+function renderAuthLanguageSelector(copy) {
+  return `<select id='auth-language' class='auth-language' aria-label='${copy.languageLabel}'>
+    <option value='ko' ${state.authLocale === 'ko' ? 'selected' : ''}>한국어</option>
+    <option value='en' ${state.authLocale === 'en' ? 'selected' : ''}>English</option>
+  </select>`;
+}
 
 const imagePixelCache = new Map();
 
@@ -379,50 +527,53 @@ function renderLanding() {
   </main>`;
 }
 
-function authVisual() {
-  return `<section class='auth-visual'><div class='auth-visual-copy'><h1>사진 2장으로 마주하는<br>투명한 공간의 기록</h1><p>공간의 변화, 자재와 시공의 모든 과정을<br>더 쉽고 투명하게 기록하고 관리하세요.</p></div>
-    <div class='auth-benefits'><div class='auth-benefit'><span>▣</span><strong>사진 2장만으로</strong><span>공간 기록 시작</span></div><div class='auth-benefit'><span>♢</span><strong>투명한 정보 관리</strong><span>신뢰할 수 있는 기록</span></div><div class='auth-benefit'><span>▥</span><strong>AI 추천으로</strong><span>최적의 선택</span></div></div>
+function authVisual(copy) {
+  return `<section class='auth-visual'><div class='auth-visual-copy'><h1>${copy.visualTitle}</h1><p>${copy.visualBody}</p></div>
+    <div class='auth-benefits'>${copy.benefits.map(([title, body], index) => `<div class='auth-benefit'><span>${['▣', '♢', '▥'][index]}</span><strong>${title}</strong><span>${body}</span></div>`).join('')}</div>
   </section>`;
 }
 
-function authTrust() {
-  const items = [['shield','안전한 데이터 보호','최신 보안 시스템 적용'],['user','전문가와 함께','신뢰할 수 있는 매칭'],['home','언제 어디서나','모든 기기에서 사용 가능'],['refresh','지속적인 업데이트','더 나은 서비스 제공']];
-  return `<div class='auth-trust'>${items.map(([iconName,title,body]) => `<div class='trust-item'><span class='trust-icon'>${icon(iconName, 'trust-svg')}</span><div><strong>${title}</strong><span>${body}</span></div></div>`).join('')}</div>`;
+function authTrust(copy) {
+  return `<div class='auth-trust'>${copy.trust.map(([iconName,title,body]) => `<div class='trust-item'><span class='trust-icon'>${icon(iconName, 'trust-svg')}</span><div><strong>${title}</strong><span>${body}</span></div></div>`).join('')}</div>`;
 }
 
 function renderLogin() {
-  setDocument('로그인', '');
-  return `<main class='auth-page'><div class='auth-shell'>${authVisual()}<section class='auth-form-panel'>
-    <button class='auth-language' type='button'>한국어⌄</button><a class='auth-brand' href='/' data-link>${brandLogo()}</a>
-    <h2>환영합니다!</h2><p class='auth-subtitle'>Moin에 로그인하고<br>나만의 공간 기록을 시작하세요.</p>
+  const copy = authCopy();
+  const login = copy.login;
+  setDocument(login.documentTitle, '');
+  return `<main class='auth-page'><div class='auth-shell'>${authVisual(copy)}<section class='auth-form-panel'>
+    ${renderAuthLanguageSelector(copy)}<a class='auth-brand' href='/' data-link>${brandLogo()}</a>
+    <h2>${login.heading}</h2><p class='auth-subtitle'>${login.subtitle}</p>
     <form id='login-form' class='stack' novalidate>
-      <div class='input-wrap'><span class='input-icon'>${icon('mail', 'tool-drawing')}</span><input name='email' type='email' maxlength='254' autocomplete='email' placeholder='이메일 주소' required></div>
-      <div class='input-wrap'><span class='input-icon'>${icon('lock', 'tool-drawing')}</span><input id='login-password' name='password' type='password' maxlength='128' autocomplete='current-password' placeholder='비밀번호' required><button class='password-toggle' type='button' data-action='toggle-password' data-target='login-password' aria-label='비밀번호 보기'>${icon('eye', 'tool-drawing')}</button></div>
-      <div class='auth-utilities'><label class='check-label'><input type='checkbox' name='remember'> 로그인 상태 유지</label><button class='button ghost' type='button' data-action='forgot' style='min-height:auto;padding:0;font-weight:500'>비밀번호 찾기</button></div>
-      <div id='auth-error' class='auth-error' role='alert'></div><button class='button primary auth-submit' type='submit'>로그인</button>
+      <div class='input-wrap'><span class='input-icon'>${icon('mail', 'tool-drawing')}</span><input name='email' type='email' maxlength='254' autocomplete='email' placeholder='${login.emailPlaceholder}' required></div>
+      <div class='input-wrap'><span class='input-icon'>${icon('lock', 'tool-drawing')}</span><input id='login-password' name='password' type='password' maxlength='128' autocomplete='current-password' placeholder='${login.passwordPlaceholder}' required><button class='password-toggle' type='button' data-action='toggle-password' data-target='login-password' aria-label='${login.showPassword}'>${icon('eye', 'tool-drawing')}</button></div>
+      <div class='auth-utilities'><label class='check-label'><input type='checkbox' name='remember'> ${login.remember}</label><button class='button ghost' type='button' data-action='forgot' style='min-height:auto;padding:0;font-weight:500'>${login.forgot}</button></div>
+      <div id='auth-error' class='auth-error' role='alert'></div><button class='button primary auth-submit' type='submit'>${login.submit}</button>
     </form>
-    <div class='divider'>또는</div><div class='social-list'>
-      <button class='social-button' data-action='social' data-provider='Google'><span class='social-logo'>G</span>Google로 로그인</button>
-      <button class='social-button kakao' data-action='social' data-provider='카카오'><span class='social-logo'>●</span>카카오로 로그인</button>
-      <button class='social-button' data-action='social' data-provider='Apple'><span class='social-logo'>●</span>Apple로 로그인</button>
+    <div class='divider'>${login.divider}</div><div class='social-list'>
+      <button class='social-button' data-action='social' data-provider='Google'><span class='social-logo'>G</span>${login.google}</button>
+      <button class='social-button kakao' data-action='social' data-provider='Kakao'><span class='social-logo'>●</span>${login.kakao}</button>
+      <button class='social-button' data-action='social' data-provider='Apple'><span class='social-logo'>●</span>${login.apple}</button>
     </div>
-    <p class='auth-switch'>계정이 없으신가요?<a href='/signup' data-link>회원가입</a></p>
-  </section></div>${authTrust()}</main>`;
+    <p class='auth-switch'>${login.switchLead}<a href='/signup' data-link>${login.switchLink}</a></p>
+  </section></div>${authTrust(copy)}</main>`;
 }
 
 function renderSignup() {
-  setDocument('회원가입', '');
-  return `<main class='auth-page'><div class='auth-shell'>${authVisual()}<section class='auth-form-panel' style='padding-top:25px'>
-    <button class='auth-language' type='button'>한국어⌄</button><a class='auth-brand' href='/' data-link style='margin-bottom:18px'>${brandLogo()}</a>
-    <h2>회원가입</h2><p class='auth-subtitle' style='margin-bottom:18px'>간단한 정보로 나만의 공간 기록을 시작하세요.</p>
+  const copy = authCopy();
+  const signup = copy.signup;
+  setDocument(signup.documentTitle, '');
+  return `<main class='auth-page'><div class='auth-shell'>${authVisual(copy)}<section class='auth-form-panel' style='padding-top:25px'>
+    ${renderAuthLanguageSelector(copy)}<a class='auth-brand' href='/' data-link style='margin-bottom:18px'>${brandLogo()}</a>
+    <h2>${signup.heading}</h2><p class='auth-subtitle' style='margin-bottom:18px'>${signup.subtitle}</p>
     <form id='signup-form' class='stack' novalidate>
-      <div class='field'><label for='signup-name'>이름</label><input id='signup-name' name='name' maxlength='60' autocomplete='name' placeholder='이름을 입력해주세요' required></div>
-      <div class='field'><label for='signup-email'>이메일</label><input id='signup-email' name='email' type='email' maxlength='254' autocomplete='email' placeholder='이메일 주소' required></div>
-      <div class='field'><label for='signup-password'>비밀번호</label><input id='signup-password' name='password' type='password' minlength='8' maxlength='128' autocomplete='new-password' placeholder='8자 이상 입력해주세요' required></div>
-      <div class='field'><label for='signup-confirm'>비밀번호 확인</label><input id='signup-confirm' name='confirm' type='password' minlength='8' maxlength='128' autocomplete='new-password' placeholder='비밀번호를 다시 입력해주세요' required></div>
-      <div class='terms-box'><label class='check-label all'><input id='all-terms' type='checkbox'> 약관 전체 동의</label><label class='check-label'><input name='terms' type='checkbox' required> (필수) 서비스 이용약관 동의</label><label class='check-label'><input name='privacy' type='checkbox' required> (필수) 개인정보 처리방침 동의</label><label class='check-label'><input name='marketing' type='checkbox'> (선택) 혜택 알림 수신 동의</label></div>
-      <div id='auth-error' class='auth-error' role='alert'></div><button class='button primary auth-submit' type='submit'>회원가입 완료</button>
-    </form><p class='auth-switch' style='margin-top:14px'>이미 계정이 있으신가요?<a href='/login' data-link>로그인하기</a></p>
+      <div class='field'><label for='signup-name'>${signup.nameLabel}</label><input id='signup-name' name='name' maxlength='60' autocomplete='name' placeholder='${signup.namePlaceholder}' required></div>
+      <div class='field'><label for='signup-email'>${signup.emailLabel}</label><input id='signup-email' name='email' type='email' maxlength='254' autocomplete='email' placeholder='${signup.emailPlaceholder}' required></div>
+      <div class='field'><label for='signup-password'>${signup.passwordLabel}</label><input id='signup-password' name='password' type='password' minlength='8' maxlength='128' autocomplete='new-password' placeholder='${signup.passwordPlaceholder}' required></div>
+      <div class='field'><label for='signup-confirm'>${signup.confirmLabel}</label><input id='signup-confirm' name='confirm' type='password' minlength='8' maxlength='128' autocomplete='new-password' placeholder='${signup.confirmPlaceholder}' required></div>
+      <div class='terms-box'><label class='check-label all'><input id='all-terms' type='checkbox'> ${signup.allTerms}</label><label class='check-label'><input name='terms' type='checkbox' required> ${signup.terms}</label><label class='check-label'><input name='privacy' type='checkbox' required> ${signup.privacy}</label><label class='check-label'><input name='marketing' type='checkbox'> ${signup.marketing}</label></div>
+      <div id='auth-error' class='auth-error' role='alert'></div><button class='button primary auth-submit' type='submit'>${signup.submit}</button>
+    </form><p class='auth-switch' style='margin-top:14px'>${signup.switchLead}<a href='/login' data-link>${signup.switchLink}</a></p>
   </section></div></main>`;
 }
 
@@ -670,40 +821,47 @@ function materialAssignmentSelectionMarkup(item, index) {
   return materialAssignmentSelectionFreehandMarkup(item, index, selection, hasSelection);
 }
 
-function materialAssignmentSelectionFreehandMarkup(item, index, selection, hasFreehand) {
+function materialSelectionToolOptions(selectedMode) {
+  const selected = normalizeMaterialSelectionTool(selectedMode);
+  return MATERIAL_SELECTION_TOOLS.map(({ id, label }) => `<option value='${id}' ${id === selected ? 'selected' : ''}>${label}</option>`).join('');
+}
+
+function materialMaskToolLabel(mask, swatch = false) {
+  const labels = {
+    'object-select': '객체 선택',
+    'quick-select': '빠른 선택',
+    'magic-wand': '마술봉 자동 선택'
+  };
+  return `${labels[mask?.tool] || '자동 선택'}: ${swatch ? '자재 샘플 영역' : '가림 객체를 제외한 적용 영역'} 통합`;
+}
+
+function materialAssignmentSelectionFreehandMarkup(item, index, _selection, hasFreehand) {
   const title = `\uc790\uc7ac ${index + 1}`;
   const target = materialTargetLabel(item.target);
   const strokes = Array.isArray(item.maskStrokes) ? item.maskStrokes.length : 0;
   const paths = Array.isArray(item.maskPaths) ? item.maskPaths.length : 0;
   const output = item.autoMask
-    ? `\ub9c8\uc220\ubd09 \uc790\ub3d9 \uc120\ud0dd: \uc801\uc6a9 \uc601\uc5ed \ud1b5\ud569`
+    ? materialMaskToolLabel(item.autoMask)
     : paths
     ? '\ub2e4\uac01\ud615 \uc62c\uac00\ubbf8 \uc120\ud0dd: ' + paths + '\uac1c \uc601\uc5ed'
     : strokes
     ? `\uc790\uc720 \uc120\ud0dd: ${strokes}\ud68d`
     : item.selectionTouched
     ? '\uc120\ud0dd\ub41c \uc801\uc6a9 \uc601\uc5ed\uc774 \uc5c6\uc2b5\ub2c8\ub2e4. \uc774\ubbf8\uc9c0\ub97c \ud074\ub9ad\ud574 \ub2e4\uc2dc \uc120\ud0dd\ud574\uc8fc\uc138\uc694.'
-    : `\uc0ac\uac01\ud615 \uc120\ud0dd: \uc67c\ucabd ${Math.round(selection.x)}%, \uc704 ${Math.round(selection.y)}%, \uac00\ub85c ${Math.round(selection.width)}%, \uc138\ub85c ${Math.round(selection.height)}%`;
+    : `${target}\uc758 \ubc14\uafb8\uace0 \uc2f6\uc740 \uba74\uc774\ub098 \uac1d\uccb4\ub97c \ud074\ub9ad\ud558\uac70\ub098 \ub4dc\ub798\uadf8\ud574 \uc120\ud0dd\ud558\uc138\uc694.`;
   return `<div class='material-assignment-selection${hasFreehand ? ' has-selection' : ''}${item.selectionTouched && !hasFreehand ? ' selection-cleared' : ''}' data-material-selection-root='${item.id}' style='--selection-x:${selection.x}%;--selection-y:${selection.y}%;--selection-width:${selection.width}%;--selection-height:${selection.height}%'>
-    <div class='material-assignment-selection-heading'><strong>${title} \uc801\uc6a9 \uc601\uc5ed</strong><span>${target} \ubd80\ubd84\uc744 \ub9c8\uc220\ubd09\uc73c\ub85c \ud074\ub9ad\ud558\uac70\ub098 \ube0c\ub7ec\uc26c/\uc62c\uac00\ubbf8\ub85c \uc9c1\uc811 \uc120\ud0dd</span></div>
-    <small class='material-selection-hint'>Shift/Ctrl + \ud074\ub9ad\u00b7\ub4dc\ub798\uadf8: \uc601\uc5ed \ucd94\uac00 \u00b7 \uc120\ud0dd\ub41c \uacf3 \ub2e4\uc2dc \ud074\ub9ad: \ud574\uc81c \u00b7 Alt + \ud074\ub9ad\u00b7\ub4dc\ub798\uadf8: \uc81c\uc678 \u00b7 \ub9c8\uc220\ubd09\uc740 \uc778\uc811 \uc601\uc5ed\ub9cc \uc120\ud0dd \u00b7 \ub2e4\uac01\ud615 \uc62c\uac00\ubbf8: \uc810 \uc5f0\uacb0 \ud6c4 \ub354\ube14\ud074\ub9ad/\uc5d4\ud130\ub85c \ub2eb\uae30 (\uccab \uc810 \uadfc\ucc98\uc5d0 \uc624\uba74 \ucd08\ub85d\uc0c9 \ub2eb\uae30 \ud45c\uc2dc)</small>
+    <div class='material-assignment-selection-heading'><strong>${title} 적용 영역</strong><span>${target}의 보이는 면만 선택하고 앞쪽 가구·식물·소품은 보호합니다.</span></div>
+    <small class='material-selection-hint'>객체 선택: 대상 위에서 드래그 · 빠른 선택: 경계를 따라 칠하기 · 마술봉: 인접한 유사 색상 · 다각형: 점 연결 · Shift/Ctrl 추가 · Alt 제외 · 선택된 곳 재클릭 해제</small>
     <div class='material-assignment-selection-stage' data-material-selection-stage='${item.id}'>
       <img src='${state.upload.current.dataUrl}' alt='${title} \uc801\uc6a9 \uc601\uc5ed\uc744 \ub9c8\uc6b0\uc2a4\ub85c \uc120\ud0dd\ud560 \ud604\uc7ac \uacf5\uac04 \uc0ac\uc9c4'>
       <canvas class='material-selection-canvas' data-material-selection-canvas='${item.id}' aria-label='${title} \uc790\uc7ac \uc801\uc6a9 \uc601\uc5ed \ub9c8\uc6b0\uc2a4 \uc120\ud0dd'></canvas>
-      <div class='material-assignment-selection-box' aria-hidden='true'><span>${target}</span></div>
     </div>
     <div class='material-selection-tools'>
-      <label class='material-selection-mode'><span>\uc120\ud0dd \ubc29\uc2dd</span><select data-material-selection-mode='${item.id}' aria-label='${title} \uc120\ud0dd \ubc29\uc2dd'><option value='magic-wand' ${item.selectionMode === 'magic-wand' ? 'selected' : ''}>\ub9c8\uc220\ubd09 \uc778\uc811 \uc601\uc5ed</option><option value='freehand' ${item.selectionMode === 'freehand' ? 'selected' : ''}>\ube0c\ub7ec\uc26c \uc790\uc720 \uc120\ud0dd</option><option value='lasso' ${item.selectionMode === 'lasso' ? 'selected' : ''}>\ub2e4\uac01\ud615 \uc62c\uac00\ubbf8 (\uc810 \uc5f0\uacb0)</option></select></label>
+      <label class='material-selection-mode'><span>선택 도구</span><select data-material-selection-mode='${item.id}' aria-label='${title} 선택 도구'>${materialSelectionToolOptions(item.selectionMode)}</select></label>
       <label class='material-wand-control'><span>\ud1a8\ub7ec\ub7f0\uc2a4</span><input type='range' min='5' max='80' step='1' value='${Math.round(item.wandTolerance || 18)}' data-material-wand-tolerance='${item.id}' aria-label='${title} \ub9c8\uc220\ubd09 \ud1a8\ub7ec\ub7f0\uc2a4'><b data-material-wand-value='${item.id}'>${Math.round(item.wandTolerance || 18)}</b></label>
       <label class='material-brush-control'><span>\ube0c\ub7ec\uc26c \ud06c\uae30</span><input type='range' min='4' max='24' step='1' value='${Math.round(item.brushSize || 10)}' data-material-brush-size='${item.id}' aria-label='${title} \ube0c\ub7ec\uc26c \ud06c\uae30'><b data-material-brush-value='${item.id}'>${Math.round(item.brushSize || 10)}</b></label>
       <span class='material-history-tools'><button type='button' class='icon-button material-history-button' data-action='undo-material-selection' data-id='${item.id}' aria-label='${title} \uc120\ud0dd \uc2e4\ud589 \ucde8\uc18c' title='Ctrl+Z'>↶</button><button type='button' class='icon-button material-history-button' data-action='redo-material-selection' data-id='${item.id}' aria-label='${title} \uc120\ud0dd \ub2e4\uc2dc \uc2e4\ud589' title='Ctrl+Shift+Z'>↷</button></span>
       <button type='button' class='button ghost material-selection-reset' data-action='reset-material-selection' data-id='${item.id}' aria-label='\uc804\uccb4 \uc120\ud0dd \uc9c0\uc6b0\uae30'>\uc804\uccb4 \uc120\ud0dd \uc9c0\uc6b0\uae30</button>
-    </div>
-    <div class='material-assignment-selection-controls' aria-label='${title} \uc0ac\uac01\ud615 \uc120\ud0dd \ubcf4\uc870 \uc870\uc815'>
-      <label><span>\uac00\ub85c \uc704\uce58</span><input type='range' min='0' max='92' step='1' value='${Math.round(selection.x)}' data-material-selection-id='${item.id}' data-material-selection-field='x' aria-label='${title} \uac00\ub85c \uc704\uce58'></label>
-      <label><span>\uc138\ub85c \uc704\uce58</span><input type='range' min='0' max='92' step='1' value='${Math.round(selection.y)}' data-material-selection-id='${item.id}' data-material-selection-field='y' aria-label='${title} \uc138\ub85c \uc704\uce58'></label>
-      <label><span>\uac00\ub85c \ud06c\uae30</span><input type='range' min='8' max='100' step='1' value='${Math.round(selection.width)}' data-material-selection-id='${item.id}' data-material-selection-field='width' aria-label='${title} \uac00\ub85c \ud06c\uae30'></label>
-      <label><span>\uc138\ub85c \ud06c\uae30</span><input type='range' min='8' max='100' step='1' value='${Math.round(selection.height)}' data-material-selection-id='${item.id}' data-material-selection-field='height' aria-label='${title} \uc138\ub85c \ud06c\uae30'></label>
     </div>
     <output data-material-selection-output='${item.id}'>${output}</output>
   </div>`;
@@ -716,21 +874,21 @@ function materialSwatchSelectionMarkup(item, index) {
   const paths = Array.isArray(item.materialMaskPaths) ? item.materialMaskPaths.length : 0;
   const hasSelection = Boolean(item.materialAutoMask || strokes || (Array.isArray(item.materialMaskPaths) && item.materialMaskPaths.length));
   const output = item.materialAutoMask
-    ? `\ub9c8\uc220\ubd09 \uc790\ub3d9 \uc120\ud0dd: \uc790\uc7ac \uc601\uc5ed \ud1b5\ud569`
+    ? materialMaskToolLabel(item.materialAutoMask, true)
     : paths
     ? '\ub2e4\uac01\ud615 \uc62c\uac00\ubbf8 \uc120\ud0dd: ' + paths + '\uac1c \uc601\uc5ed'
     : strokes
     ? `\uc790\uc720 \uc120\ud0dd: ${strokes}\ud68d`
     : '\uc790\uc7ac \uc804\uccb4\ub97c \uc0ac\uc6a9';
   return `<div class='material-swatch-selection${hasSelection ? ' has-selection' : ''}' data-material-swatch-root='${item.id}'>
-    <div class='material-assignment-selection-heading'><strong>${title} \uc790\uc7ac \ud30c\ud2b8 \uc120\ud0dd</strong><span>\uc801\uc6a9\ud560 \uc790\uc7ac \uc0ac\uc9c4 \ub0b4\uc5d0\uc11c \uc0ac\uc6a9\ud560 \ubd80\ubd84\uc744 \ub9c8\uc220\ubd09/\ube0c\ub7ec\uc26c/\uc62c\uac00\ubbf8\ub85c \uc120\ud0dd</span></div>
-    <small class='material-selection-hint'>Shift/Ctrl + \ud074\ub9ad\u00b7\ub4dc\ub798\uadf8: \uc601\uc5ed \ucd94\uac00 \u00b7 \uc120\ud0dd\ub41c \uacf3 \ub2e4\uc2dc \ud074\ub9ad: \ud574\uc81c \u00b7 Alt + \ud074\ub9ad\u00b7\ub4dc\ub798\uadf8: \uc81c\uc678 \u00b7 \ub2e4\uac01\ud615 \uc62c\uac00\ubbf8: \uc810 \uc5f0\uacb0 \ud6c4 \ub354\ube14\ud074\ub9ad/\uc5d4\ud130\ub85c \ub2eb\uae30 (\uccab \uc810 \uadfc\ucc98\uc5d0 \uc624\uba74 \ucd08\ub85d\uc0c9 \ub2eb\uae30 \ud45c\uc2dc)</small>
+    <div class='material-assignment-selection-heading'><strong>${title} 자재 파트 선택</strong><span>실제로 가져올 무늬·색상·재질 부분만 선택합니다.</span></div>
+    <small class='material-selection-hint'>객체 선택·빠른 선택·마술봉·다각형 올가미를 같은 방식으로 사용할 수 있습니다. Shift/Ctrl 추가 · Alt 제외 · 선택된 곳 재클릭 해제</small>
     <div class='material-assignment-selection-stage' data-material-swatch-stage='${item.id}'>
       <img src='${item.upload.dataUrl}' alt='${title} \uc790\uc7ac \uc0ac\uc9c4 \uc120\ud0dd \uc601\uc5ed'>
       <canvas class='material-selection-canvas material-swatch-selection-canvas' data-material-swatch-canvas='${item.id}' aria-label='${title} \uc790\uc7ac \uc0ac\uc9c4 \ubd80\ubd84 \uc120\ud0dd'></canvas>
     </div>
     <div class='material-selection-tools'>
-      <label class='material-selection-mode'><span>\uc120\ud0dd \ubc29\uc2dd</span><select data-material-swatch-mode='${item.id}' aria-label='${title} \uc790\uc7ac \uc120\ud0dd \ubc29\uc2dd'><option value='magic-wand' ${item.materialSelectionMode === 'magic-wand' ? 'selected' : ''}>\ub9c8\uc220\ubd09 \uc778\uc811 \uc601\uc5ed</option><option value='freehand' ${item.materialSelectionMode === 'freehand' ? 'selected' : ''}>\ube0c\ub7ec\uc26c \uc790\uc720 \uc120\ud0dd</option><option value='lasso' ${item.materialSelectionMode === 'lasso' ? 'selected' : ''}>\ub2e4\uac01\ud615 \uc62c\uac00\ubbf8 (\uc810 \uc5f0\uacb0)</option></select></label>
+      <label class='material-selection-mode'><span>선택 도구</span><select data-material-swatch-mode='${item.id}' aria-label='${title} 자재 선택 도구'>${materialSelectionToolOptions(item.materialSelectionMode)}</select></label>
       <label class='material-wand-control'><span>\ud1a8\ub7ec\ub7f0\uc2a4</span><input type='range' min='5' max='80' step='1' value='${Math.round(item.materialWandTolerance || 18)}' data-material-swatch-tolerance='${item.id}' aria-label='${title} \uc790\uc7ac \ub9c8\uc220\ubd09 \ud1a8\ub7ec\ub7f0\uc2a4'><b data-material-swatch-tolerance-value='${item.id}'>${Math.round(item.materialWandTolerance || 18)}</b></label>
       <label class='material-brush-control'><span>\ube0c\ub7ec\uc26c \ud06c\uae30</span><input type='range' min='4' max='24' step='1' value='${Math.round(item.materialBrushSize || 10)}' data-material-swatch-brush-size='${item.id}' aria-label='${title} \uc790\uc7ac \ube0c\ub7ec\uc26c \ud06c\uae30'><b data-material-swatch-brush-value='${item.id}'>${Math.round(item.materialBrushSize || 10)}</b></label>
       <span class='material-history-tools'><button type='button' class='icon-button material-history-button' data-action='undo-material-selection' data-id='${item.id}' aria-label='${title} \uc790\uc7ac \uc120\ud0dd \uc2e4\ud589 \ucde8\uc18c' title='Ctrl+Z'>↶</button><button type='button' class='icon-button material-history-button' data-action='redo-material-selection' data-id='${item.id}' aria-label='${title} \uc790\uc7ac \uc120\ud0dd \ub2e4\uc2dc \uc2e4\ud589' title='Ctrl+Shift+Z'>↷</button></span>
@@ -1366,6 +1524,8 @@ async function setUploadFile(key, file) {
       assignment.maskStrokes = [];
       assignment.maskPaths = [];
       assignment.lassoDraft = null;
+      assignment.objectDraft = null;
+      assignment.quickDraft = null;
       assignment.autoMask = null;
       assignment.selectionTouched = false;
     }
@@ -1427,14 +1587,15 @@ function clampObjectSelection(selection = {}) {
   };
 }
 
-function selectionToPayload(selection, maskStrokes = [], autoMask = null, maskPaths = []) {
+function selectionToPayload(selection, maskStrokes = [], autoMask = null, maskPaths = [], selectionMode = 'rectangle') {
   const normalized = clampObjectSelection(selection);
+  const normalizedMode = normalizeMaterialSelectionTool(selectionMode);
   return {
     x: Number((normalized.x / 100).toFixed(4)),
     y: Number((normalized.y / 100).toFixed(4)),
     width: Number((normalized.width / 100).toFixed(4)),
     height: Number((normalized.height / 100).toFixed(4)),
-    mode: autoMask ? 'magic-wand' : Array.isArray(maskPaths) && maskPaths.length ? 'lasso' : Array.isArray(maskStrokes) && maskStrokes.length ? 'freehand' : 'rectangle',
+    mode: autoMask ? (autoMask.tool || normalizedMode) : Array.isArray(maskPaths) && maskPaths.length ? 'lasso' : Array.isArray(maskStrokes) && maskStrokes.length ? 'quick-select' : 'rectangle',
     unit: 'normalized'
   };
 }
@@ -1648,15 +1809,9 @@ function updateObjectSelectionUi(root = document.querySelector('[data-object-sel
 
 function updateMaterialAssignmentSelectionUi(root, assignment) {
   if (!root || !assignment) return;
-  const selection = clampObjectSelection(assignment.selection);
-  assignment.selection = selection;
-  root.style.setProperty('--selection-x', `${selection.x}%`);
-  root.style.setProperty('--selection-y', `${selection.y}%`);
-  root.style.setProperty('--selection-width', `${selection.width}%`);
-  root.style.setProperty('--selection-height', `${selection.height}%`);
   const output = root.querySelector('[data-material-selection-output]');
   if (output && assignment.autoMask) {
-    output.textContent = '\ub9c8\uc220\ubd09 \uc790\ub3d9 \uc120\ud0dd: \uc801\uc6a9 \uc601\uc5ed \ud1b5\ud569';
+    output.textContent = materialMaskToolLabel(assignment.autoMask);
     return;
   }
   if (output && Array.isArray(assignment.maskPaths) && assignment.maskPaths.length) {
@@ -1671,14 +1826,14 @@ function updateMaterialAssignmentSelectionUi(root, assignment) {
     output.textContent = '\uc120\ud0dd\ub41c \uc801\uc6a9 \uc601\uc5ed\uc774 \uc5c6\uc2b5\ub2c8\ub2e4. \uc774\ubbf8\uc9c0\ub97c \ud074\ub9ad\ud574 \ub2e4\uc2dc \uc120\ud0dd\ud574\uc8fc\uc138\uc694.';
     return;
   }
-  if (output) output.textContent = `선택 영역: 왼쪽 ${Math.round(selection.x)}%, 위 ${Math.round(selection.y)}%, 가로 ${Math.round(selection.width)}%, 세로 ${Math.round(selection.height)}%`;
+  if (output) output.textContent = `${materialTargetLabel(assignment.target)}의 바꾸고 싶은 면이나 객체를 클릭하거나 드래그해 선택하세요.`;
 }
 
 function updateMaterialSwatchSelectionUi(root, assignment) {
   if (!root || !assignment) return;
   const output = root.querySelector('[data-material-swatch-output]');
   if (!output) return;
-  if (assignment.materialAutoMask) output.textContent = '\ub9c8\uc220\ubd09 \uc790\ub3d9 \uc120\ud0dd: \uc790\uc7ac \uc601\uc5ed \ud1b5\ud569';
+  if (assignment.materialAutoMask) output.textContent = materialMaskToolLabel(assignment.materialAutoMask, true);
   else if (assignment.materialMaskPaths?.length) output.textContent = `\ub2e4\uac01\ud615 \uc62c\uac00\ubbf8 \uc120\ud0dd: ${assignment.materialMaskPaths.length}\uac1c \uc601\uc5ed`;
   else if (assignment.materialMaskStrokes?.length) output.textContent = `\uc790\uc720 \uc120\ud0dd: ${assignment.materialMaskStrokes.length}\ud68d`;
   else output.textContent = '\uc790\uc7ac \uc804\uccb4\ub97c \uc0ac\uc6a9';
@@ -1698,6 +1853,8 @@ function materialSelectionSettings(assignment, kind = 'source') {
     strokes: swatch ? assignment.materialMaskStrokes : assignment.maskStrokes,
     paths: swatch ? assignment.materialMaskPaths : assignment.maskPaths,
     draft: swatch ? assignment.materialLassoDraft : assignment.lassoDraft,
+    objectDraft: swatch ? assignment.materialObjectDraft : assignment.objectDraft,
+    quickDraft: swatch ? assignment.materialQuickDraft : assignment.quickDraft,
     brushSize: swatch ? assignment.materialBrushSize : assignment.brushSize,
     mode: swatch ? assignment.materialSelectionMode : assignment.selectionMode,
     tolerance: swatch ? assignment.materialWandTolerance : assignment.wandTolerance,
@@ -1724,7 +1881,14 @@ function hasMaterialSelection(assignment, kind = 'source') {
 
 function cloneMaterialMask(mask) {
   if (!mask?.data?.length || !mask.width || !mask.height) return null;
-  return { width: mask.width, height: mask.height, data: new Uint8Array(mask.data), selectedCount: Number(mask.selectedCount || mask.data.reduce((sum, value) => sum + value, 0)) };
+  return {
+    width: mask.width,
+    height: mask.height,
+    data: new Uint8Array(mask.data),
+    selectedCount: Number(mask.selectedCount || mask.data.reduce((sum, value) => sum + value, 0)),
+    tool: mask.tool || null,
+    bounds: mask.bounds ? { ...mask.bounds } : null
+  };
 }
 
 function cloneMaterialStrokes(strokes) {
@@ -1869,6 +2033,69 @@ function drawMaterialSelectionPaths(context, paths, draft, width, height) {
   context.restore();
 }
 
+function normalizeSelectionBounds(start, current, minimum = 3) {
+  const left = Math.min(Number(start?.x || 0), Number(current?.x || 0));
+  const top = Math.min(Number(start?.y || 0), Number(current?.y || 0));
+  const right = Math.max(Number(start?.x || 0), Number(current?.x || 0));
+  const bottom = Math.max(Number(start?.y || 0), Number(current?.y || 0));
+  if ((right - left) >= minimum && (bottom - top) >= minimum) {
+    return { x: left, y: top, width: right - left, height: bottom - top };
+  }
+  const half = minimum * 2.5;
+  return {
+    x: clampNumber(Number(current?.x || 0) - half, 0, 100 - (half * 2)),
+    y: clampNumber(Number(current?.y || 0) - half, 0, 100 - (half * 2)),
+    width: half * 2,
+    height: half * 2
+  };
+}
+
+function drawObjectSelectionDraft(context, draft, width, height) {
+  if (!draft?.start || !draft?.current) return;
+  const bounds = normalizeSelectionBounds(draft.start, draft.current);
+  const x = (bounds.x / 100) * width;
+  const y = (bounds.y / 100) * height;
+  const boxWidth = (bounds.width / 100) * width;
+  const boxHeight = (bounds.height / 100) * height;
+  context.save();
+  context.setLineDash([Math.max(6, width * .008), Math.max(4, width * .005)]);
+  context.lineWidth = Math.max(2, Math.round(Math.min(width, height) * .004));
+  context.strokeStyle = draft.operation === 'subtract' ? 'rgba(112,55,45,.96)' : 'rgba(168,96,48,.98)';
+  context.fillStyle = draft.operation === 'subtract' ? 'rgba(112,55,45,.08)' : 'rgba(168,96,48,.1)';
+  context.fillRect(x, y, boxWidth, boxHeight);
+  context.strokeRect(x, y, boxWidth, boxHeight);
+  context.setLineDash([]);
+  context.font = `700 ${Math.max(11, Math.round(Math.min(width, height) * .022))}px SUIT, sans-serif`;
+  context.fillStyle = 'rgba(93,64,55,.96)';
+  context.fillText('대상 경계 감지', x + 8, y + 18);
+  context.restore();
+}
+
+function drawQuickSelectionDraft(context, draft, width, height, brushSize) {
+  const points = Array.isArray(draft?.points) ? draft.points : [];
+  if (!points.length) return;
+  const size = Math.max(8, Math.round(Math.min(width, height) * (Number(brushSize || 10) / 1000)));
+  context.save();
+  context.lineCap = 'round';
+  context.lineJoin = 'round';
+  context.lineWidth = size;
+  context.strokeStyle = draft.operation === 'subtract' ? 'rgba(112,55,45,.78)' : 'rgba(168,96,48,.68)';
+  context.fillStyle = context.strokeStyle;
+  const firstX = (points[0].x / 100) * width;
+  const firstY = (points[0].y / 100) * height;
+  if (points.length === 1) {
+    context.beginPath();
+    context.arc(firstX, firstY, size / 2, 0, Math.PI * 2);
+    context.fill();
+  } else {
+    context.beginPath();
+    context.moveTo(firstX, firstY);
+    for (const point of points.slice(1)) context.lineTo((point.x / 100) * width, (point.y / 100) * height);
+    context.stroke();
+  }
+  context.restore();
+}
+
 function drawMaterialSelectionCanvas(canvas, assignment, kind = 'source') {
   const settings = materialSelectionSettings(assignment, kind);
   const image = settings.image;
@@ -1880,6 +2107,8 @@ function drawMaterialSelectionCanvas(canvas, assignment, kind = 'source') {
   context.clearRect(0, 0, canvas.width, canvas.height);
   drawAutoMaskOverlay(context, settings.autoMask);
   drawMaterialSelectionPaths(context, settings.paths, settings.draft, canvas.width, canvas.height);
+  drawObjectSelectionDraft(context, settings.objectDraft, canvas.width, canvas.height);
+  drawQuickSelectionDraft(context, settings.quickDraft, canvas.width, canvas.height, settings.brushSize);
   const strokes = Array.isArray(settings.strokes) ? settings.strokes : [];
   if (!strokes.length) return;
   context.save();
@@ -2158,6 +2387,128 @@ function addLassoPoint(assignment, kind, point, event, root) {
   return false;
 }
 
+function selectionDraftKey(kind, tool) {
+  if (tool === 'object-select') return kind === 'swatch' ? 'materialObjectDraft' : 'objectDraft';
+  return kind === 'swatch' ? 'materialQuickDraft' : 'quickDraft';
+}
+
+function setSelectionToolDraft(assignment, kind, tool, draft) {
+  assignment[selectionDraftKey(kind, tool)] = draft;
+}
+
+function isBackgroundSurfaceTarget(target) {
+  return ['wall', 'floor', 'ceiling', 'tile', 'door-window'].includes(target);
+}
+
+function applyComputedMaterialMask(assignment, kind, incomingMask, point, options = {}) {
+  const currentMask = kind === 'swatch' ? assignment.materialAutoMask : assignment.autoMask;
+  const hasExistingSelection = hasMaterialSelection(assignment, kind);
+  const requestedOperation = options.operation || (options.subtractive ? 'subtract' : options.additive ? 'add' : 'replace');
+  const clickedSelection = materialMaskContainsPoint(currentMask, point);
+  const operation = requestedOperation === 'replace' && hasExistingSelection
+    ? (clickedSelection ? 'subtract' : 'replace')
+    : requestedOperation;
+  let nextMask = operation === 'subtract'
+    ? subtractMaterialMasks(currentMask, incomingMask)
+    : operation === 'add'
+    ? mergeMaterialMasks(currentMask, incomingMask)
+    : incomingMask;
+  if (nextMask) {
+    nextMask.tool = options.tool || incomingMask.tool || null;
+    nextMask.bounds = incomingMask.bounds ? { ...incomingMask.bounds } : null;
+  }
+  if (kind === 'swatch') {
+    assignment.materialAutoMask = nextMask;
+    if (operation === 'replace') {
+      assignment.materialMaskStrokes = [];
+      assignment.materialMaskPaths = [];
+    }
+  } else {
+    assignment.selectionTouched = true;
+    assignment.autoMask = nextMask;
+    if (operation === 'replace') {
+      assignment.maskStrokes = [];
+      assignment.maskPaths = [];
+    }
+  }
+  recordMaterialSelectionHistory(assignment);
+}
+
+function sampledGesturePoints(points, maximum = 6) {
+  if (!Array.isArray(points) || points.length <= maximum) return Array.isArray(points) ? points : [];
+  return Array.from({ length: maximum }, (_, index) => points[Math.round((index / (maximum - 1)) * (points.length - 1))]);
+}
+
+async function createObjectSelectionMask(assignment, kind, draft) {
+  const settings = materialSelectionSettings(assignment, kind);
+  const bounds = normalizeSelectionBounds(draft.start, draft.current, 4);
+  const center = { x: bounds.x + (bounds.width / 2), y: bounds.y + (bounds.height / 2) };
+  // A background surface starts from the exact surface pixel the user first
+  // touched. Foreground objects start from the ROI centre, which avoids
+  // treating the empty corner used to draw the marquee as the target.
+  const seed = kind === 'source' && isBackgroundSurfaceTarget(settings.target) ? draft.start : center;
+  const boundsCoverage = Math.max(.02, (bounds.width * bounds.height) / 10000);
+  const mask = await createConnectedPixelMask(settings.image, seed, settings.tolerance, {
+    bounds,
+    maxCoverage: Math.min(settings.maxCoverage, Math.max(.08, boundsCoverage * .96))
+  });
+  mask.tool = 'object-select';
+  mask.bounds = bounds;
+  return mask;
+}
+
+async function createQuickSelectionMask(assignment, kind, draft) {
+  const settings = materialSelectionSettings(assignment, kind);
+  const radius = clampNumber(Number(settings.brushSize || 10) * .58, 3.5, 12);
+  let combined = null;
+  for (const point of sampledGesturePoints(draft.points, 6)) {
+    const bounds = {
+      x: clampNumber(point.x - radius, 0, 100 - (radius * 2)),
+      y: clampNumber(point.y - radius, 0, 100 - (radius * 2)),
+      width: radius * 2,
+      height: radius * 2
+    };
+    const candidate = await createConnectedPixelMask(settings.image, point, Math.max(8, settings.tolerance * .82), {
+      bounds,
+      maxCoverage: Math.max(.08, ((bounds.width * bounds.height) / 10000) * .98)
+    });
+    combined = mergeMaterialMasks(combined, candidate);
+  }
+  if (combined) {
+    combined.tool = 'quick-select';
+    combined.bounds = null;
+  }
+  return combined;
+}
+
+async function applyEdgeAwareSelection(assignment, kind, draft, root, tool) {
+  const settings = materialSelectionSettings(assignment, kind);
+  if (!settings.image || assignment.selectionBusy) return;
+  assignment.selectionBusy = true;
+  root?.classList.add('is-selecting');
+  const output = root?.querySelector(kind === 'swatch' ? '[data-material-swatch-output]' : '[data-material-selection-output]');
+  if (output) output.textContent = tool === 'object-select'
+    ? '지정한 범위에서 대상 경계와 앞뒤 가림 관계를 찾는 중...'
+    : '브러시가 지나간 곳의 경계를 따라 선택 영역을 확장하는 중...';
+  try {
+    const mask = tool === 'object-select'
+      ? await createObjectSelectionMask(assignment, kind, draft)
+      : await createQuickSelectionMask(assignment, kind, draft);
+    if (!mask?.selectedCount) throw new Error('선택할 대상 경계를 찾지 못했습니다. 대상 안쪽에서 다시 시작하거나 빠른 선택 도구를 사용해주세요.');
+    applyComputedMaterialMask(assignment, kind, mask, draft.current || draft.points?.[0], {
+      operation: draft.operation,
+      tool
+    });
+  } catch (error) {
+    notify(error.message);
+  } finally {
+    assignment.selectionBusy = false;
+    setSelectionToolDraft(assignment, kind, tool, null);
+    root?.classList.remove('is-selecting');
+    refreshMaterialSelectionUi(root, assignment, kind);
+  }
+}
+
 async function applyMagicWandSelection(assignment, kind, point, root, options = {}) {
   const settings = materialSelectionSettings(assignment, kind);
   if (!settings.image || assignment.selectionBusy) return;
@@ -2170,32 +2521,14 @@ async function applyMagicWandSelection(assignment, kind, point, root, options = 
       maxCoverage: settings.maxCoverage
     });
     if (!mask.selectedCount) throw new Error('\uc120\ud0dd\ud560 \uc720\uc0ac \uc601\uc5ed\uc774 \uc5c6\uc2b5\ub2c8\ub2e4.');
-    if (mask.overflowed) throw new Error('\uc120\ud0dd \ubc94\uc704\uac00 \ub108\ubb34 \ub113\uc2b5\ub2c8\ub2e4. \ud1a8\ub7ec\ub7f0\uc2a4\ub97c \ub0ae\ucd94\uac70\ub098 \ube0c\ub7ec\uc26c\u00b7\ub2e4\uac01\ud615 \ub3c4\uad6c\ub85c \uacbd\uacc4\ub97c \ucd94\uac00\ud574\uc8fc\uc138\uc694.');
-    const currentMask = kind === 'swatch' ? assignment.materialAutoMask : assignment.autoMask;
-    const hasExistingSelection = hasMaterialSelection(assignment, kind);
-    const isAdditive = Boolean(options.additive) || (hasExistingSelection && !materialMaskContainsPoint(currentMask, point));
-    const isSubtractive = Boolean(options.subtractive);
-    const shouldToggleOff = !isAdditive && !isSubtractive && materialMaskContainsPoint(currentMask, point);
-    const nextMask = isSubtractive || shouldToggleOff
-      ? subtractMaterialMasks(currentMask, mask)
-      : isAdditive
-      ? mergeMaterialMasks(currentMask, mask)
-      : mask;
-    if (kind === 'swatch') {
-      assignment.materialAutoMask = nextMask;
-      if (!isAdditive && !hasExistingSelection) {
-        assignment.materialMaskStrokes = [];
-        assignment.materialMaskPaths = [];
-      }
-    } else {
-      assignment.selectionTouched = true;
-      assignment.autoMask = nextMask;
-      if (!isAdditive && !hasExistingSelection) {
-        assignment.maskStrokes = [];
-        assignment.maskPaths = [];
-      }
-    }
-    recordMaterialSelectionHistory(assignment);
+    mask.tool = 'magic-wand';
+    mask.bounds = null;
+    applyComputedMaterialMask(assignment, kind, mask, point, {
+      additive: options.additive,
+      subtractive: options.subtractive,
+      tool: 'magic-wand'
+    });
+    if (mask.overflowed) notify('선택 범위가 넓어 안전 한도까지만 선택했습니다. 빠른 선택 도구로 필요한 부분을 더해주세요.');
   } catch (error) {
     notify(error.message);
   } finally {
@@ -2212,162 +2545,106 @@ function refreshMaterialSelectionUi(root, assignment, kind = 'source') {
   if (kind === 'source') root.classList.toggle('selection-cleared', Boolean(assignment.selectionTouched) && !hasMaterialSelection(assignment, kind));
   if (kind === 'swatch') updateMaterialSwatchSelectionUi(root, assignment);
   else updateMaterialAssignmentSelectionUi(root, assignment);
+  root.dataset.selectionTool = materialSelectionSettings(assignment, kind).mode;
   drawMaterialSelectionCanvas(root.querySelector(kind === 'swatch' ? '[data-material-swatch-canvas]' : '[data-material-selection-canvas]'), assignment, kind);
   updateMaterialSelectionHistoryUi(assignment);
+}
+
+function bindMaterialSelectionCanvas(canvas, assignment, kind) {
+  const swatch = kind === 'swatch';
+  const stage = canvas.closest(swatch ? '[data-material-swatch-stage]' : '[data-material-selection-stage]');
+  const root = canvas.closest(swatch ? '[data-material-swatch-root]' : '[data-material-selection-root]');
+  const image = swatch ? assignment.upload : state.upload.current;
+  if (!stage || !root || !image) return;
+  canvas.width = image.width || 1;
+  canvas.height = image.height || 1;
+  ensureMaterialSelectionHistory(assignment);
+  refreshMaterialSelectionUi(root, assignment, kind);
+  let gesture = null;
+  const currentMode = () => normalizeMaterialSelectionTool(swatch ? assignment.materialSelectionMode : assignment.selectionMode);
+  const finish = (event) => {
+    if (!gesture || event.pointerId !== gesture.pointerId) return;
+    const completed = gesture;
+    gesture = null;
+    try { canvas.releasePointerCapture(event.pointerId); } catch { /* pointer capture can already be released */ }
+    if (completed.type === 'object-select' || completed.type === 'quick-select') {
+      void applyEdgeAwareSelection(assignment, kind, completed.draft, root, completed.type);
+    }
+  };
+  const cancel = (event) => {
+    if (!gesture || event.pointerId !== gesture.pointerId) return;
+    const cancelled = gesture;
+    gesture = null;
+    try { canvas.releasePointerCapture(event.pointerId); } catch { /* pointer capture can already be released */ }
+    setSelectionToolDraft(assignment, kind, cancelled.type, null);
+    refreshMaterialSelectionUi(root, assignment, kind);
+  };
+  canvas.addEventListener('pointerdown', (event) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    const point = materialSelectionCanvasPoint(event, stage);
+    const mode = currentMode();
+    state.upload.activeSelection = { assignmentId: assignment.id, kind };
+    if (mode === 'lasso') {
+      event.preventDefault();
+      addLassoPoint(assignment, kind, point, event, root);
+      return;
+    }
+    if (mode === 'magic-wand') {
+      event.preventDefault();
+      void applyMagicWandSelection(assignment, kind, point, root, {
+        additive: event.ctrlKey || event.metaKey || event.shiftKey,
+        subtractive: event.altKey
+      });
+      return;
+    }
+    const operation = event.altKey ? 'subtract' : (event.ctrlKey || event.metaKey || event.shiftKey) ? 'add' : 'replace';
+    const draft = mode === 'object-select'
+      ? { operation, start: point, current: point }
+      : { operation, points: [point] };
+    if (!swatch) assignment.selectionTouched = true;
+    setSelectionToolDraft(assignment, kind, mode, draft);
+    gesture = { pointerId: event.pointerId, type: mode, draft };
+    canvas.setPointerCapture?.(event.pointerId);
+    drawMaterialSelectionCanvas(canvas, assignment, kind);
+    event.preventDefault();
+  });
+  canvas.addEventListener('pointermove', (event) => {
+    if (!gesture && currentMode() === 'lasso' && lassoDraftFor(assignment, kind)) {
+      const draft = lassoDraftFor(assignment, kind);
+      draft.cursor = materialSelectionCanvasPoint(event, stage);
+      drawMaterialSelectionCanvas(canvas, assignment, kind);
+      event.preventDefault();
+      return;
+    }
+    if (!gesture || event.pointerId !== gesture.pointerId) return;
+    const point = materialSelectionCanvasPoint(event, stage);
+    if (gesture.type === 'object-select') {
+      gesture.draft.current = point;
+    } else {
+      const previous = gesture.draft.points.at(-1);
+      if (Math.hypot(point.x - previous.x, point.y - previous.y) < .3) return;
+      gesture.draft.points.push(point);
+    }
+    drawMaterialSelectionCanvas(canvas, assignment, kind);
+    event.preventDefault();
+  });
+  canvas.addEventListener('pointerup', finish);
+  canvas.addEventListener('pointercancel', cancel);
+  canvas.addEventListener('dblclick', (event) => {
+    if (currentMode() !== 'lasso') return;
+    event.preventDefault();
+    completeLassoPath(assignment, kind, root);
+  });
 }
 
 function bindMaterialSelectionCanvases() {
   document.querySelectorAll('[data-material-selection-canvas]').forEach((canvas) => {
     const assignment = findMaterialAssignment(canvas.dataset.materialSelectionCanvas);
-    const stage = canvas.closest('[data-material-selection-stage]');
-    if (!assignment || !stage) return;
-    canvas.width = state.upload.current?.width || 1;
-    canvas.height = state.upload.current?.height || 1;
-    drawMaterialSelectionCanvas(canvas, assignment);
-    ensureMaterialSelectionHistory(assignment);
-    updateMaterialSelectionHistoryUi(assignment);
-    let gesture = null;
-    const finish = (event) => {
-      if (!gesture || event.pointerId !== gesture.pointerId) return;
-      try { canvas.releasePointerCapture(event.pointerId); } catch { /* pointer capture can already be released */ }
-      gesture = null;
-      recordMaterialSelectionHistory(assignment);
-      refreshMaterialSelectionUi(canvas.closest('[data-material-selection-root]'), assignment);
-    };
-    canvas.addEventListener('pointerdown', (event) => {
-      if (event.pointerType === 'mouse' && event.button !== 0) return;
-      const point = materialSelectionCanvasPoint(event, stage);
-      state.upload.activeSelection = { assignmentId: assignment.id, kind: 'source' };
-      if (assignment.selectionMode === 'lasso') {
-        event.preventDefault();
-        addLassoPoint(assignment, 'source', point, event, canvas.closest('[data-material-selection-root]'));
-        return;
-      }
-      if (assignment.selectionMode === 'magic-wand') {
-        event.preventDefault();
-        void applyMagicWandSelection(assignment, 'source', point, canvas.closest('[data-material-selection-root]'), { additive: event.ctrlKey || event.metaKey || event.shiftKey, subtractive: event.altKey });
-        return;
-      }
-      ensureMaterialSelectionHistory(assignment);
-      const additive = event.ctrlKey || event.metaKey || event.shiftKey;
-      const subtractive = event.altKey;
-      if (!additive && !subtractive) {
-        assignment.selectionTouched = true;
-        assignment.autoMask = null;
-        assignment.maskStrokes = [];
-        assignment.maskPaths = [];
-        recordMaterialSelectionHistory(assignment);
-      }
-      const stroke = { operation: subtractive ? 'subtract' : additive ? 'add' : 'replace', size: Number(assignment.brushSize || 10), points: [point] };
-      assignment.maskStrokes = Array.isArray(assignment.maskStrokes) ? assignment.maskStrokes : [];
-      assignment.maskStrokes.push(stroke);
-      gesture = { pointerId: event.pointerId, stroke };
-      canvas.setPointerCapture?.(event.pointerId);
-      drawMaterialSelectionCanvas(canvas, assignment);
-      refreshMaterialSelectionUi(canvas.closest('[data-material-selection-root]'), assignment);
-      event.preventDefault();
-    });
-    canvas.addEventListener('pointermove', (event) => {
-      if (!gesture && assignment.selectionMode === 'lasso' && lassoDraftFor(assignment, 'source')) {
-        const point = materialSelectionCanvasPoint(event, stage);
-        const draft = lassoDraftFor(assignment, 'source');
-        draft.cursor = point;
-        drawMaterialSelectionCanvas(canvas, assignment);
-        event.preventDefault();
-        return;
-      }
-      if (!gesture || event.pointerId !== gesture.pointerId) return;
-      const point = materialSelectionCanvasPoint(event, stage);
-      const previous = gesture.stroke.points.at(-1);
-      const distance = Math.hypot(point.x - previous.x, point.y - previous.y);
-      if (distance < 0.15) return;
-      gesture.stroke.points.push(point);
-      drawMaterialSelectionCanvas(canvas, assignment);
-      event.preventDefault();
-    });
-    canvas.addEventListener('pointerup', finish);
-    canvas.addEventListener('pointercancel', finish);
-    canvas.addEventListener('dblclick', (event) => {
-      if (assignment.selectionMode !== 'lasso') return;
-      event.preventDefault();
-      completeLassoPath(assignment, 'source', canvas.closest('[data-material-selection-root]'));
-    });
+    if (assignment) bindMaterialSelectionCanvas(canvas, assignment, 'source');
   });
   document.querySelectorAll('[data-material-swatch-canvas]').forEach((canvas) => {
     const assignment = findMaterialAssignment(canvas.dataset.materialSwatchCanvas);
-    const stage = canvas.closest('[data-material-swatch-stage]');
-    if (!assignment || !stage || !assignment.upload) return;
-    canvas.width = assignment.upload.width || 1;
-    canvas.height = assignment.upload.height || 1;
-    drawMaterialSelectionCanvas(canvas, assignment, 'swatch');
-    ensureMaterialSelectionHistory(assignment);
-    updateMaterialSelectionHistoryUi(assignment);
-    let gesture = null;
-    const root = canvas.closest('[data-material-swatch-root]');
-    const finish = (event) => {
-      if (!gesture || event.pointerId !== gesture.pointerId) return;
-      try { canvas.releasePointerCapture(event.pointerId); } catch { /* pointer capture can already be released */ }
-      gesture = null;
-      recordMaterialSelectionHistory(assignment);
-      refreshMaterialSelectionUi(root, assignment, 'swatch');
-    };
-    canvas.addEventListener('pointerdown', (event) => {
-      if (event.pointerType === 'mouse' && event.button !== 0) return;
-      const point = materialSelectionCanvasPoint(event, stage);
-      state.upload.activeSelection = { assignmentId: assignment.id, kind: 'swatch' };
-      if (assignment.materialSelectionMode === 'lasso') {
-        event.preventDefault();
-        addLassoPoint(assignment, 'swatch', point, event, root);
-        return;
-      }
-      if (assignment.materialSelectionMode === 'magic-wand') {
-        event.preventDefault();
-        void applyMagicWandSelection(assignment, 'swatch', point, root, { additive: event.ctrlKey || event.metaKey || event.shiftKey, subtractive: event.altKey });
-        return;
-      }
-      ensureMaterialSelectionHistory(assignment);
-      const additive = event.ctrlKey || event.metaKey || event.shiftKey;
-      const subtractive = event.altKey;
-      if (!additive && !subtractive) {
-        assignment.materialAutoMask = null;
-        assignment.materialMaskStrokes = [];
-        assignment.materialMaskPaths = [];
-        recordMaterialSelectionHistory(assignment);
-      }
-      const stroke = { operation: subtractive ? 'subtract' : additive ? 'add' : 'replace', size: Number(assignment.materialBrushSize || 10), points: [point] };
-      assignment.materialMaskStrokes = Array.isArray(assignment.materialMaskStrokes) ? assignment.materialMaskStrokes : [];
-      assignment.materialMaskStrokes.push(stroke);
-      gesture = { pointerId: event.pointerId, stroke };
-      canvas.setPointerCapture?.(event.pointerId);
-      drawMaterialSelectionCanvas(canvas, assignment, 'swatch');
-      refreshMaterialSelectionUi(root, assignment, 'swatch');
-      event.preventDefault();
-    });
-    canvas.addEventListener('pointermove', (event) => {
-      if (!gesture && assignment.materialSelectionMode === 'lasso' && lassoDraftFor(assignment, 'swatch')) {
-        const point = materialSelectionCanvasPoint(event, stage);
-        const draft = lassoDraftFor(assignment, 'swatch');
-        draft.cursor = point;
-        drawMaterialSelectionCanvas(canvas, assignment, 'swatch');
-        event.preventDefault();
-        return;
-      }
-      if (!gesture || event.pointerId !== gesture.pointerId) return;
-      const point = materialSelectionCanvasPoint(event, stage);
-      const previous = gesture.stroke.points.at(-1);
-      const distance = Math.hypot(point.x - previous.x, point.y - previous.y);
-      if (distance < 0.15) return;
-      gesture.stroke.points.push(point);
-      drawMaterialSelectionCanvas(canvas, assignment, 'swatch');
-      event.preventDefault();
-    });
-    canvas.addEventListener('pointerup', finish);
-    canvas.addEventListener('pointercancel', finish);
-    canvas.addEventListener('dblclick', (event) => {
-      if (assignment.materialSelectionMode !== 'lasso') return;
-      event.preventDefault();
-      completeLassoPath(assignment, 'swatch', root);
-    });
+    if (assignment) bindMaterialSelectionCanvas(canvas, assignment, 'swatch');
   });
 }
 
@@ -2588,8 +2865,8 @@ async function handleAction(button) {
   if (action === 'toggle-mobile-menu') { state.mobileMenu = !state.mobileMenu; app.innerHTML = renderLanding(); bindPage(); }
   else if (action === 'start') { const data = await api('/api/v1/landing/start'); navigate(data.next); }
   else if (action === 'toggle-password') { const input = document.getElementById(button.dataset.target); if (input) input.type = input.type === 'password' ? 'text' : 'password'; }
-  else if (action === 'forgot') notify('비밀번호 재설정 메일 기능은 인증 서비스 연동 후 활성화됩니다.');
-  else if (action === 'social') notify(`${button.dataset.provider} 로그인은 키 연동 후 활성화됩니다.`);
+  else if (action === 'forgot') notify(authCopy().forgotNotice);
+  else if (action === 'social') notify(`${button.dataset.provider} ${authCopy().socialUnavailable}`);
   else if (action === 'demo-login') {
     const data = await api('/api/v1/auth/demo', { method: 'POST', body: '{}' }); resetUserState(); state.user = data.user; notify('테스트 계정으로 로그인했습니다.'); navigate('/dashboard', { replace: true });
   }
@@ -2625,6 +2902,8 @@ async function handleAction(button) {
     assignment.maskStrokes = [];
     assignment.maskPaths = [];
     assignment.lassoDraft = null;
+    assignment.objectDraft = null;
+    assignment.quickDraft = null;
     assignment.autoMask = null;
     assignment.selectionTouched = true;
     recordMaterialSelectionHistory(assignment);
@@ -2637,6 +2916,8 @@ async function handleAction(button) {
     assignment.materialMaskStrokes = [];
     assignment.materialMaskPaths = [];
     assignment.materialLassoDraft = null;
+    assignment.materialObjectDraft = null;
+    assignment.materialQuickDraft = null;
     assignment.materialAutoMask = null;
     recordMaterialSelectionHistory(assignment);
     const root = document.querySelector(`[data-material-swatch-root='${assignment.id}']`);
@@ -2648,8 +2929,8 @@ async function handleAction(button) {
   else if (action === 'material-assignments-analyze') {
     const { current, materialAssignments } = state.upload;
     if (!current || !materialAssignmentsReady() || state.analyzing) return;
-    if (materialAssignments.some((item) => item.selectionTouched && !hasMaterialSelection(item))) {
-      const error = new Error('\uc801\uc6a9 \uc601\uc5ed\uc774 \ube48 \uc790\uc7ac\uac00 \uc788\uc2b5\ub2c8\ub2e4. \uac01 \uc790\uc7ac\uc758 \uc801\uc6a9 \uc601\uc5ed\uc744 \ud074\ub9ad\ud558\uac70\ub098 \uadf8\ub824\uc8fc\uc138\uc694.');
+    if (materialAssignments.some((item) => !hasMaterialSelection(item))) {
+      const error = new Error('\uc801\uc6a9 \uc601\uc5ed\uc744 \uc120\ud0dd\ud558\uc9c0 \uc54a\uc740 \uc790\uc7ac\uac00 \uc788\uc2b5\ub2c8\ub2e4. \uac01 \uc790\uc7ac\ubcc4\ub85c \uac1d\uccb4 \uc120\ud0dd, \ube60\ub978 \uc120\ud0dd, \ub9c8\uc220\ubd09, \ub2e4\uac01\ud615 \uc62c\uac00\ubbf8 \uc911 \ud558\ub098\ub97c \uc0ac\uc6a9\ud574\uc8fc\uc138\uc694.');
       notify(setAnalysisFailure(error));
       app.innerHTML = renderDashboard();
       bindPage();
@@ -2679,12 +2960,12 @@ async function handleAction(button) {
         method: 'POST',
         body: JSON.stringify({
           currentImage: current.dataUrl,
-          materialAssignments: materialAssignments.map(({ target, upload, selection, maskStrokes, maskPaths, autoMask }, index) => ({
+          materialAssignments: materialAssignments.map(({ target, upload, selection, maskStrokes, maskPaths, autoMask, selectionMode }, index) => ({
             target,
             image: upload.dataUrl,
             mask: masks[index],
             ...(materialMasks[index] ? { materialMask: materialMasks[index] } : {}),
-            selection: selectionToPayload(selection, maskStrokes, autoMask, maskPaths)
+            selection: selectionToPayload(selection, maskStrokes, autoMask, maskPaths, selectionMode)
           }))
         })
       });
@@ -2811,6 +3092,15 @@ async function handleAction(button) {
 }
 
 function bindPage() {
+  const authLanguage = document.querySelector('#auth-language');
+  authLanguage?.addEventListener('change', () => {
+    const nextLocale = authLanguage.value;
+    if (!Object.hasOwn(AUTH_LOCALES, nextLocale) || nextLocale === state.authLocale) return;
+    state.authLocale = nextLocale;
+    try { localStorage.setItem(AUTH_LOCALE_STORAGE_KEY, nextLocale); } catch { /* storage can be unavailable in restricted browsing contexts */ }
+    app.innerHTML = location.pathname === '/signup' ? renderSignup() : renderLogin();
+    bindPage();
+  });
   const loginForm = document.querySelector('#login-form');
   loginForm?.addEventListener('submit', async (event) => {
     event.preventDefault(); const errorBox = document.querySelector('#auth-error'); errorBox.textContent = '';
@@ -2842,6 +3132,8 @@ function bindPage() {
     assignment.maskStrokes = [];
     assignment.maskPaths = [];
     assignment.lassoDraft = null;
+    assignment.objectDraft = null;
+    assignment.quickDraft = null;
     assignment.autoMask = null;
     assignment.selectionTouched = false;
     app.innerHTML = renderDashboard();
@@ -2867,8 +3159,10 @@ function bindPage() {
   document.querySelectorAll('[data-material-selection-mode]').forEach((input) => input.addEventListener('change', () => {
     const assignment = findMaterialAssignment(input.dataset.materialSelectionMode);
     if (!assignment) return;
-    assignment.selectionMode = ['freehand', 'lasso'].includes(input.value) ? input.value : 'magic-wand';
+    assignment.selectionMode = normalizeMaterialSelectionTool(input.value);
     assignment.lassoDraft = null;
+    assignment.objectDraft = null;
+    assignment.quickDraft = null;
     refreshMaterialSelectionUi(input.closest('[data-material-selection-root]'), assignment);
   }));
   document.querySelectorAll('[data-material-wand-tolerance]').forEach((input) => input.addEventListener('input', () => {
@@ -2881,8 +3175,10 @@ function bindPage() {
   document.querySelectorAll('[data-material-swatch-mode]').forEach((input) => input.addEventListener('change', () => {
     const assignment = findMaterialAssignment(input.dataset.materialSwatchMode);
     if (!assignment) return;
-    assignment.materialSelectionMode = ['freehand', 'lasso'].includes(input.value) ? input.value : 'magic-wand';
+    assignment.materialSelectionMode = normalizeMaterialSelectionTool(input.value);
     assignment.materialLassoDraft = null;
+    assignment.materialObjectDraft = null;
+    assignment.materialQuickDraft = null;
     refreshMaterialSelectionUi(input.closest('[data-material-swatch-root]'), assignment, 'swatch');
   }));
   document.querySelectorAll('[data-material-swatch-tolerance]').forEach((input) => input.addEventListener('input', () => {
@@ -2909,6 +3205,8 @@ function bindPage() {
       assignment.materialMaskStrokes = [];
       assignment.materialMaskPaths = [];
       assignment.materialLassoDraft = null;
+      assignment.materialObjectDraft = null;
+      assignment.materialQuickDraft = null;
       assignment.materialAutoMask = null;
       app.innerHTML = renderDashboard();
       bindPage();
@@ -2926,6 +3224,8 @@ function bindPage() {
         assignment.materialMaskStrokes = [];
         assignment.materialMaskPaths = [];
         assignment.materialLassoDraft = null;
+        assignment.materialObjectDraft = null;
+        assignment.materialQuickDraft = null;
         assignment.materialAutoMask = null;
         app.innerHTML = renderDashboard();
         bindPage();

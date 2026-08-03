@@ -94,19 +94,22 @@ VERSION CONTROL AND ROLLBACK:
 Output exactly one full-frame, photorealistic after image aligned pixel-for-pixel with the space skeleton. No split screens, borders, captions, labels, or embedded UI.
 `.trim();
 
-export const MOIN_OBJECT_AWARE_INPAINTING_PROMPT_VERSION = 'moin-object-aware-inpainting-v1';
+export const MOIN_OBJECT_AWARE_INPAINTING_PROMPT_VERSION = 'moin-object-aware-inpainting-v2';
 
 export const MOIN_OBJECT_AWARE_INPAINTING_SYSTEM_PROMPT = [
   'Role: Advanced Neural Texturing & Object Inpainting Engine.',
   '',
-  'You perform precise object-aware material transfer inside architectural spaces. Apply the supplied material only inside the user-designated white mask region while preserving the source image everywhere else.',
+  'You perform precise object-aware material transfer inside architectural spaces. The user mask is a maximum editable ROI; first identify the named target inside that ROI, then change only the target\'s visible pixels while preserving every occluding foreground object.',
   '',
   'STRICT THREE-INPUT PROCESSING:',
   '- Input A is the absolute structural skeleton: preserve its camera, perspective, crop, architecture, windows, furniture, decor, object positions, scale, and occlusion.',
-  '- Input B is the BINARY TARGET MASK. White pixels are the only editable target region; black pixels are immutable background.',
-  '- Input C is the material swatch. Transfer only its colour, texture, pattern, reflectance, and surface character into the white region of Input B.',
+  '- Input B is the BINARY TARGET ROI MASK. White pixels define the maximum area in which edits may occur; black pixels are immutable background.',
+  '- Input C is the material swatch. Transfer only its colour, texture, pattern, reflectance, and surface character onto the named target visible inside Input B.',
   '',
   'OBJECT-AWARE TEXTURE TRANSFER:',
+  '- Segment the named target semantically inside the white ROI before rendering. The ROI is not permission to repaint every white pixel.',
+  '- Respect depth order and occlusion. Plants, lamps, cabinet fronts, furniture, decor, people, and other objects in front of a selected wall, floor, ceiling, window, or background surface stay source-locked even when they overlap white mask pixels.',
+  '- When the named target is a foreground object, edit only that object\'s visible silhouette and preserve background pixels visible through gaps, holes, legs, leaves, or open frames.',
   '- Respect the masked object\'s perspective, curvature, seams, boundaries, contact shadows, highlights, and material scale.',
   '- Never let texture, colour, or lighting changes cross the mask boundary.',
   '- Preserve every pixel outside the white mask region: walls, floors, tables, windows, scenery, and all non-target objects must remain unchanged.',
@@ -126,7 +129,7 @@ export const MOIN_OBJECT_AWARE_INPAINTING_SYSTEM_PROMPT = [
   'Return exactly one full-frame high-resolution after image aligned to Input A.'
 ].join('\n');
 
-export const MOIN_TARGET_MATERIALS_PROMPT_VERSION = 'moin-target-material-transfer-v1';
+export const MOIN_TARGET_MATERIALS_PROMPT_VERSION = 'moin-target-material-transfer-v2';
 
 export const MOIN_TARGET_MATERIALS_SYSTEM_PROMPT = [
   'Role: Moin final-result interior material transfer engine.',
@@ -134,7 +137,10 @@ export const MOIN_TARGET_MATERIALS_SYSTEM_PROMPT = [
   'Input A is the source space photo and is the absolute geometry lock.',
   'Each named material image is mapped only to its named target surface.',
   'When a material swatch mask is supplied, use only its white pixels as the usable texture sample and ignore black pixels.',
-  'When a target mask is supplied, white pixels in that mask are the only editable pixels; black pixels must remain unchanged.',
+  'When a target mask is supplied, white pixels define the maximum editable ROI and black pixels must remain unchanged.',
+  'Inside each white ROI, segment the named target first. Preserve all foreground occluders and holes instead of repainting every white pixel.',
+  'For background targets such as walls, floors, ceilings, tiles, doors, and windows, objects in front remain source-locked even when their pixels lie inside the ROI.',
+  'For foreground targets such as furniture, sinks, worktops, and decor, edit only the visible target silhouette and preserve the background visible through gaps.',
   'Preserve camera, perspective, crop, walls, windows, doors, furniture positions, scale, lighting direction, and every non-target pixel.',
   'Apply only the requested target surface appearance; never add, remove, move, resize, or restage objects.',
   'Use perspective-aware texture mapping and preserve realistic shadows, highlights, seams, and contact shading.',
@@ -541,8 +547,9 @@ recommendedSlugs may only contain: premium-wallpaper, oak-flooring, cream-tile, 
       `TARGET OBJECT: ${selectedObjectLabel}`,
       '',
       'INPUT A = SOURCE SPACE / STRUCTURE LOCK. Preserve all geometry, camera, architecture, furniture, decor, object positions, scale, crop, and lighting outside the target mask.',
-      'INPUT B = BINARY TARGET MASK. White pixels are the only editable target region. Black pixels are immutable background.',
-      'INPUT C = MATERIAL SWATCH. Transfer its material character only inside the white pixels of Input B.',
+      'INPUT B = BINARY TARGET ROI MASK. White pixels define the maximum editable ROI. Black pixels are immutable background.',
+      'INPUT C = MATERIAL SWATCH. Inside the white ROI, first segment the named target and transfer material only to its visible silhouette.',
+      'Preserve foreground occluders, openings, holes, and background visible through the target. The white ROI is not permission to repaint every white pixel.',
       '',
       `For objectMaterialMappings, include only the target object "${selectedObjectLabel}" and describe the requested material, colour, texture, and lighting integration.`,
       'geometrySummary must describe the locked source geometry and the target boundary without proposing any structural change.',
@@ -552,8 +559,8 @@ recommendedSlugs may only contain: premium-wallpaper, oak-flooring, cream-tile, 
     const targetMaterialsAnalysisPrompt = [
       'Return Korean JSON only. This is target-specific material transfer, not a redesign.',
       'INPUT A is the immutable source space photo and geometry lock.',
-      ...(targetMaterials || []).map(({ target, mask, materialMask }, index) => `INPUT B${index + 1} is the material swatch assigned only to target "${target}"${materialMask ? '; its swatch mask limits the usable sample to white pixels.' : ''}${mask ? ' The following source mask makes white pixels the only editable target area.' : '.'}`),
-      'Map each swatch only to its named target surface. Preserve every other object, surface, camera, perspective, crop, position, scale, lighting direction, and shadow.',
+      ...(targetMaterials || []).map(({ target, mask, materialMask }, index) => `INPUT B${index + 1} is the material swatch assigned only to target "${target}"${materialMask ? '; its swatch mask limits the usable sample to white pixels.' : ''}${mask ? ' The following source mask is a maximum editable ROI; segment the named target inside it before editing.' : '.'}`),
+      'Map each swatch only to its named target surface. Preserve every foreground occluder, opening, hole, and background pixel visible through the target, plus every other object, surface, camera, perspective, crop, position, scale, lighting direction, and shadow.',
       'Return a plan for the final result image only. Do not introduce unrequested furniture, objects, text, collage, split screen, or UI.',
       'Keys: summary, style, palette (exactly 3), recommendedSlugs, geometrySummary, objectMaterialMappings.',
       'recommendedSlugs may only contain: premium-wallpaper, oak-flooring, cream-tile, eco-paint, sample-paint.'
@@ -577,7 +584,7 @@ recommendedSlugs may only contain: premium-wallpaper, oak-flooring, cream-tile, 
               { inlineData: { mimeType: materialMask.mimeType, data: materialMask.base64 } }
             ] : []),
             ...(mask ? [
-              { text: `INPUT MASK ${index + 1} - WHITE PIXELS ARE THE ONLY EDITABLE PART OF TARGET: ${target}` },
+              { text: `INPUT MASK ${index + 1} - WHITE PIXELS DEFINE THE MAXIMUM EDITABLE ROI FOR: ${target}; SEGMENT THAT NAMED TARGET AND PRESERVE OCCLUDING FOREGROUND OBJECTS` },
               { inlineData: { mimeType: mask.mimeType, data: mask.base64 } }
             ] : [])
           ])
@@ -586,7 +593,7 @@ recommendedSlugs may only contain: premium-wallpaper, oak-flooring, cream-tile, 
       ? [
           { text: 'INPUT A — SOURCE_SPACE_STRUCTURE_LOCK (authoritative source; preserve all geometry and non-target pixels)' },
           { inlineData: { mimeType: current.mimeType, data: current.base64 } },
-          { text: 'INPUT B — BINARY_TARGET_MASK (white = editable target region; black = immutable background)' },
+          { text: 'INPUT B — BINARY_TARGET_ROI_MASK (white = maximum editable ROI; black = immutable; preserve foreground occluders inside white ROI)' },
           { inlineData: { mimeType: mask.mimeType, data: mask.base64 } },
           { text: 'INPUT C — MATERIAL_SWATCH (apply only inside Input B white pixels)' },
           { inlineData: { mimeType: objectMaterial.mimeType, data: objectMaterial.base64 } }
@@ -671,10 +678,11 @@ Output requirements:
       '- Preserve its exact camera, perspective, crop, architecture, openings, furniture, decor, object count, positions, scale, depth order, occlusion, and all non-target appearance.',
       '',
       'INPUT B (second attached image) is the BINARY TARGET MASK:',
-      '- White pixels are the only editable region. Black pixels must remain unchanged.',
+      '- White pixels define the maximum editable ROI. Black pixels must remain unchanged.',
+      '- First segment the named target inside the white ROI. Do not repaint foreground occluders or background visible through gaps, holes, legs, leaves, or open frames.',
       '',
       'INPUT C (third attached image) is the MATERIAL SWATCH:',
-      '- Apply its colour, texture, pattern, surface response, and material character only inside the white region of Input B.',
+      '- Apply its colour, texture, pattern, surface response, and material character only to the named target\'s visible pixels inside Input B.',
       '',
       'Locked geometry summary:',
       analysis.geometrySummary,
@@ -683,7 +691,7 @@ Output requirements:
       mappingPlan,
       '',
       'Lighting and output requirements:',
-      '- Reuse Input A light direction and intensity. Create plausible highlights, contact shadows, ambient bounce, and material response only within Input B white pixels.',
+      '- Reuse Input A light direction and intensity. Create plausible highlights, contact shadows, ambient bounce, and material response only on the segmented target inside Input B white pixels.',
       '- Never alter any black-mask pixel: do not change its geometry, objects, materials, colours, texture, light, or shadow.',
       '- Return one full-frame after image aligned to Input A, suitable for a before/after overlay.',
       '- No split screen, collage, borders, captions, labels, text, logos, watermarks, DIY value gauges, dashboards, or UI.'
@@ -691,8 +699,8 @@ Output requirements:
     const targetMaterialsRenderPrompt = [
       'Create ONE clean, high-resolution, photorealistic final interior image only. This is target-specific material inpainting, never a redesign.',
       'INPUT A (first attached image) is the immutable SOURCE SPACE / GEOMETRY LOCK. Preserve its exact camera, perspective, crop, architecture, windows, doors, furniture, decor, object count, positions, scale, depth order, occlusions, lighting direction, and all non-target pixels.',
-      ...(targetMaterials || []).map(({ target, mask, materialMask }, index) => `INPUT B${index + 1} is the material swatch assigned ONLY to target "${target}". Apply its colour, texture, pattern, scale, reflectance, and finish only to that named target${materialMask ? ' and use its material mask as the only usable swatch sample.' : ''}${mask ? ' Use the matching source mask so white pixels are the only editable target pixels.' : '.'}`),
-      'Do not let any target material leak onto other surfaces. Do not add, remove, replace, move, rotate, resize, or restage anything.',
+      ...(targetMaterials || []).map(({ target, mask, materialMask }, index) => `INPUT B${index + 1} is the material swatch assigned ONLY to target "${target}". Apply its colour, texture, pattern, scale, reflectance, and finish only to that named target${materialMask ? ' and use its material mask as the only usable swatch sample.' : ''}${mask ? ' Use the matching source mask as a maximum editable ROI, then segment the named target inside it.' : '.'}`),
+      'Do not let any target material leak onto foreground occluders, other surfaces, openings, holes, or background visible through the target. Do not add, remove, replace, move, rotate, resize, or restage anything.',
       '',
       'Locked geometry summary:',
       analysis.geometrySummary,
