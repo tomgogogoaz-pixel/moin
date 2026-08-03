@@ -177,15 +177,23 @@ function icon(name, className = '') {
   return `<svg ${common}>${paths[name] || ''}</svg>`;
 }
 
+function houseMarkSvg() {
+  return `<svg class='moin-house-mark' viewBox='0 0 54 54' fill='none' aria-hidden='true'><circle class='dot' cx='9' cy='7' r='3'/><path d='m7 22 20-14 20 14M12 19v27h30V19M22 46V31h11v15' stroke='currentColor' stroke-width='2'/></svg>`;
+}
+
 function houseLogo(compact = false, href = '/dashboard') {
   return `<a class='app-logo' href='${href}' data-link aria-label='Moin 홈'>
-    <svg viewBox='0 0 54 54' fill='none' aria-hidden='true'><circle class='dot' cx='9' cy='7' r='3' fill='#A86030' fill-opacity='.6'/><path d='m7 22 20-14 20 14M12 19v27h30V19M22 46V31h11v15' stroke='currentColor' stroke-width='2'/></svg>
+    ${houseMarkSvg()}
     <span${compact ? ` style='font-size:24px'` : ''}>Moin</span>
   </a>`;
 }
 
 function brandLogo() {
   return `<span class='wordmark compact'><span class='brand-mark' aria-hidden='true'></span><span>Moin</span></span>`;
+}
+
+function quotationLogo() {
+  return `<span class='wordmark compact quotation-logo'>${houseMarkSvg()}<span>Moin</span></span>`;
 }
 
 async function api(url, options = {}) {
@@ -1101,7 +1109,7 @@ function renderEstimate() {
   return `<main class='app-page estimate-page'>${desktopHeader('estimate')}${mobileHeader({back:true})}<div class='app-content'>${appBackButton()}
     <div class='page-heading estimate-toolbar'><div><h1>견적서</h1><p>프로젝트에 필요한 예상 비용을 항목별로 확인하세요.</p></div><div class='estimate-toolbar-actions'><a class='button' href='/market' data-link>자재 수정</a><button class='button primary' data-action='print-estimate'>${icon('download','tool-drawing')} PDF 저장 · 인쇄</button></div></div>
     <article class='estimate-sheet' aria-labelledby='estimate-document-title'>
-      <header class='estimate-document-header'><div class='estimate-document-brand'>${brandLogo()}<span>공간을 더 쉽고 투명하게</span></div><div class='estimate-document-title'><span>QUOTATION</span><h2 id='estimate-document-title'>공간 시공 견적서</h2></div></header>
+      <header class='estimate-document-header'><div class='estimate-document-brand'>${quotationLogo()}<span>공간을 더 쉽고 투명하게</span></div><div class='estimate-document-title'><span>QUOTATION</span><h2 id='estimate-document-title'>공간 시공 견적서</h2></div></header>
       <div class='estimate-source-note'><span>${sourceLabel}</span><p>${sourceNote}</p></div>
       <dl class='estimate-meta'><div><dt>견적 번호</dt><dd>${quoteNumber}</dd></div><div><dt>받는 분</dt><dd>${escapeHtml(state.user?.name || 'Moin 고객')}님</dd></div><div><dt>프로젝트</dt><dd>${escapeHtml(state.project?.title || 'Moin 공간 개선 프로젝트')}</dd></div><div><dt>발행일</dt><dd>${dateLabel(now)}</dd></div><div><dt>유효기간</dt><dd>${dateLabel(validUntil)}까지</dd></div><div><dt>견적 상태</dt><dd><span class='estimate-status'>예상 견적</span></dd></div></dl>
       <section class='estimate-total-hero' aria-label='총 예상 견적'><span>총 예상 견적</span><strong>${money.format(estimate.total)}원</strong><small>자재비·공구비·표준 인건비 포함</small></section>
