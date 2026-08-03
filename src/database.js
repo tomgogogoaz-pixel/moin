@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { hashPassword } from './security.js';
 
-const MATERIALS = [
+export const MATERIALS = [
   ['premium-wallpaper', 'wallpaper', '프리미엄 벽지', '32롤 세트 - 실크 마감', '롤', 320000, '/assets/materials/wallpaper.webp', 32],
   ['oak-flooring', 'flooring', '원목 바닥재', '18㎡ 세트 - 내추럴 오크', '㎡', 540000, '/assets/materials/flooring.webp', 18],
   ['ceramic-tile', 'tile', '포세린 타일', '28장 세트 - 무광 크림', '장', 374000, '/assets/materials/tile.webp', 28],

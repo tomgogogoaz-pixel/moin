@@ -54,6 +54,7 @@ function createMaterialAssignment(target = 'wall') {
     maskPaths: [],
     lassoDraft: null,
     autoMask: null,
+    selectionTouched: false,
     selectionMode: 'magic-wand',
     wandTolerance: 18,
     brushSize: 10,
@@ -85,6 +86,7 @@ const state = {
   uploadOpen: false,
   analyzing: false,
   analysisError: null,
+  analysisErrorStatus: null,
   analysisPhase: null,
   upload: createUploadState(),
   materials: [],
@@ -125,6 +127,7 @@ function resetUserState() {
   state.uploadOpen = false;
   state.analyzing = false;
   state.analysisError = null;
+  state.analysisErrorStatus = null;
   state.analysisPhase = null;
   state.upload = createUploadState();
   state.cart = [];
@@ -270,6 +273,18 @@ function navigate(path, { replace = false } = {}) {
 
 function isProtected(pathname) {
   return protectedRoutes.some((route) => pathname === route || pathname.startsWith(`${route}/`));
+}
+
+function requestedLoginReturnTo() {
+  const raw = new URLSearchParams(location.search).get('returnTo');
+  if (!raw) return '/dashboard';
+  try {
+    const target = new URL(raw, location.origin);
+    if (target.origin !== location.origin || !isProtected(target.pathname)) return '/dashboard';
+    return `${target.pathname}${target.search}${target.hash}`;
+  } catch {
+    return '/dashboard';
+  }
 }
 
 function notificationCenterLink() {
@@ -558,6 +573,17 @@ function analysisErrorMessage(error) {
   return message || '최종 결과를 생성하지 못했습니다. 입력 이미지를 확인하고 다시 시도해주세요.';
 }
 
+function clearAnalysisFailure() {
+  state.analysisError = null;
+  state.analysisErrorStatus = null;
+}
+
+function setAnalysisFailure(error) {
+  state.analysisError = analysisErrorMessage(error);
+  state.analysisErrorStatus = Number(error?.status) || null;
+  return state.analysisError;
+}
+
 function assertGeneratedProject(data) {
   const project = data?.project;
   const afterUrl = String(project?.afterUrl || '');
@@ -647,8 +673,10 @@ function materialAssignmentSelectionFreehandMarkup(item, index, selection, hasFr
     ? '\ub2e4\uac01\ud615 \uc62c\uac00\ubbf8 \uc120\ud0dd: ' + paths + '\uac1c \uc601\uc5ed'
     : strokes
     ? `\uc790\uc720 \uc120\ud0dd: ${strokes}\ud68d`
+    : item.selectionTouched
+    ? '\uc120\ud0dd\ub41c \uc801\uc6a9 \uc601\uc5ed\uc774 \uc5c6\uc2b5\ub2c8\ub2e4. \uc774\ubbf8\uc9c0\ub97c \ud074\ub9ad\ud574 \ub2e4\uc2dc \uc120\ud0dd\ud574\uc8fc\uc138\uc694.'
     : `\uc0ac\uac01\ud615 \uc120\ud0dd: \uc67c\ucabd ${Math.round(selection.x)}%, \uc704 ${Math.round(selection.y)}%, \uac00\ub85c ${Math.round(selection.width)}%, \uc138\ub85c ${Math.round(selection.height)}%`;
-  return `<div class='material-assignment-selection${hasFreehand ? ' has-selection' : ''}' data-material-selection-root='${item.id}' style='--selection-x:${selection.x}%;--selection-y:${selection.y}%;--selection-width:${selection.width}%;--selection-height:${selection.height}%'>
+  return `<div class='material-assignment-selection${hasFreehand ? ' has-selection' : ''}${item.selectionTouched && !hasFreehand ? ' selection-cleared' : ''}' data-material-selection-root='${item.id}' style='--selection-x:${selection.x}%;--selection-y:${selection.y}%;--selection-width:${selection.width}%;--selection-height:${selection.height}%'>
     <div class='material-assignment-selection-heading'><strong>${title} \uc801\uc6a9 \uc601\uc5ed</strong><span>${target} \ubd80\ubd84\uc744 \ub9c8\uc220\ubd09\uc73c\ub85c \ud074\ub9ad\ud558\uac70\ub098 \ube0c\ub7ec\uc26c/\uc62c\uac00\ubbf8\ub85c \uc9c1\uc811 \uc120\ud0dd</span></div>
     <small class='material-selection-hint'>Shift/Ctrl + \ud074\ub9ad\u00b7\ub4dc\ub798\uadf8: \uc601\uc5ed \ucd94\uac00 \u00b7 \uc120\ud0dd\ub41c \uacf3 \ub2e4\uc2dc \ud074\ub9ad: \ud574\uc81c \u00b7 Alt + \ud074\ub9ad\u00b7\ub4dc\ub798\uadf8: \uc81c\uc678 \u00b7 \ub9c8\uc220\ubd09\uc740 \uc778\uc811 \uc601\uc5ed\ub9cc \uc120\ud0dd \u00b7 \ub2e4\uac01\ud615 \uc62c\uac00\ubbf8: \uc810 \uc5f0\uacb0 \ud6c4 \ub354\ube14\ud074\ub9ad/\uc5d4\ud130\ub85c \ub2eb\uae30 (\uccab \uc810 \uadfc\ucc98\uc5d0 \uc624\uba74 \ucd08\ub85d\uc0c9 \ub2eb\uae30 \ud45c\uc2dc)</small>
     <div class='material-assignment-selection-stage' data-material-selection-stage='${item.id}'>
@@ -743,7 +771,7 @@ function uploadModal() {
   const analysisStatus = state.analyzing
     ? `<p class='analysis-progress' role='status'>${state.analysisPhase === 'preparing' ? '선택 영역 마스크를 준비하고 있습니다.' : '이미지와 선택 마스크를 Gemini에 전송하고 있습니다. 입력 크기에 따라 최대 3분 정도 걸릴 수 있어요.'}</p>`
     : state.analysisError
-    ? `<div class='analysis-error' role='alert'><strong>최종 결과를 만들지 못했습니다.</strong><span>${escapeHtml(state.analysisError)}</span><small>입력 이미지는 유지되어 있으니 수정 후 다시 시도할 수 있어요.</small></div>`
+    ? `<div class='analysis-error' role='alert'><strong>최종 결과를 만들지 못했습니다.</strong><span>${escapeHtml(state.analysisError)}</span><small>입력 이미지는 유지되어 있으니 수정 후 다시 시도할 수 있어요.</small>${state.analysisErrorStatus === 401 ? `<div class='analysis-error-actions'><button type='button' class='button primary' data-action='analysis-login'>로그인</button><button type='button' class='button ghost' data-action='dismiss-analysis-error'>취소</button></div>` : ''}</div>`
     : '';
   return `<div class='modal-backdrop' data-action='backdrop-close'><section class='upload-modal' role='dialog' aria-modal='true' aria-labelledby='upload-title' data-modal>
     <div class='modal-handle'></div><button class='icon-button modal-close' data-action='close-upload' aria-label='닫기'>${icon('close','tool-drawing')}</button><h2 id='upload-title'>공간 이미지 업로드</h2>
@@ -1178,6 +1206,11 @@ async function renderRoute() {
     else if (pathname === '/login') html = state.user ? (navigate('/dashboard', { replace: true }), '') : renderLogin();
     else if (pathname === '/signup') html = state.user ? (navigate('/dashboard', { replace: true }), '') : renderSignup();
     else if (pathname === '/dashboard') {
+      if (new URLSearchParams(location.search).get('resumeUpload') === '1') {
+        state.uploadOpen = true;
+        document.body.classList.add('modal-open');
+        history.replaceState({ ...(history.state || {}), moin: true }, '', '/dashboard');
+      }
       await refreshProjects();
       html = renderDashboard();
     }
@@ -1326,6 +1359,7 @@ async function setUploadFile(key, file) {
       assignment.maskPaths = [];
       assignment.lassoDraft = null;
       assignment.autoMask = null;
+      assignment.selectionTouched = false;
     }
   }
 }
@@ -1625,6 +1659,10 @@ function updateMaterialAssignmentSelectionUi(root, assignment) {
     output.textContent = `\uc790\uc720 \uc120\ud0dd: ${assignment.maskStrokes.length}\ud68d`;
     return;
   }
+  if (output && assignment.selectionTouched) {
+    output.textContent = '\uc120\ud0dd\ub41c \uc801\uc6a9 \uc601\uc5ed\uc774 \uc5c6\uc2b5\ub2c8\ub2e4. \uc774\ubbf8\uc9c0\ub97c \ud074\ub9ad\ud574 \ub2e4\uc2dc \uc120\ud0dd\ud574\uc8fc\uc138\uc694.';
+    return;
+  }
   if (output) output.textContent = `선택 영역: 왼쪽 ${Math.round(selection.x)}%, 위 ${Math.round(selection.y)}%, 가로 ${Math.round(selection.width)}%, 세로 ${Math.round(selection.height)}%`;
 }
 
@@ -1656,17 +1694,17 @@ function materialSelectionSettings(assignment, kind = 'source') {
     mode: swatch ? assignment.materialSelectionMode : assignment.selectionMode,
     tolerance: swatch ? assignment.materialWandTolerance : assignment.wandTolerance,
     target: assignment.target,
-    maxCoverage: swatch ? 0.82 : ({
-      wall: 0.5,
-      floor: 0.4,
-      furniture: 0.32,
-      sink: 0.12,
-      countertop: 0.12,
-      tile: 0.22,
-      ceiling: 0.22,
-      'door-window': 0.28,
-      decor: 0.16,
-      other: 0.22
+    maxCoverage: swatch ? 0.92 : ({
+      wall: 0.78,
+      floor: 0.78,
+      furniture: 0.6,
+      sink: 0.45,
+      countertop: 0.45,
+      tile: 0.65,
+      ceiling: 0.62,
+      'door-window': 0.55,
+      decor: 0.45,
+      other: 0.62
     }[assignment.target] || 0.22)
   };
 }
@@ -1698,6 +1736,7 @@ function cloneMaterialPaths(paths) {
 
 function captureMaterialSelectionSnapshot(assignment) {
   return {
+    selectionTouched: Boolean(assignment.selectionTouched),
     autoMask: cloneMaterialMask(assignment.autoMask),
     maskStrokes: cloneMaterialStrokes(assignment.maskStrokes),
     maskPaths: cloneMaterialPaths(assignment.maskPaths),
@@ -1732,6 +1771,7 @@ function restoreMaterialSelectionSnapshot(assignment, snapshot) {
   assignment.materialAutoMask = cloneMaterialMask(snapshot.materialAutoMask);
   assignment.materialMaskStrokes = cloneMaterialStrokes(snapshot.materialMaskStrokes);
   assignment.materialMaskPaths = cloneMaterialPaths(snapshot.materialMaskPaths);
+  assignment.selectionTouched = Boolean(snapshot.selectionTouched);
 }
 
 function updateMaterialSelectionHistoryUi(assignment) {
@@ -1976,6 +2016,7 @@ async function createConnectedPixelMask(image, point, tolerance = 18, options = 
   const queue = new Int32Array(width * height);
   let head = 0;
   let tail = 0;
+  let overflowed = false;
   queue[tail++] = start;
   visited[start] = 1;
   selected[start] = 1;
@@ -1993,13 +2034,16 @@ async function createConnectedPixelMask(image, point, tolerance = 18, options = 
         pixels.data[currentOffset], pixels.data[currentOffset + 1], pixels.data[currentOffset + 2]
       ]);
       if (seedDistance > seedThreshold || localDistance > localThreshold) return;
-      if (selectedCount >= maxSelected) return;
+      if (selectedCount >= maxSelected) {
+        overflowed = true;
+        return;
+      }
       selected[neighbor] = 1;
       selectedCount += 1;
       queue[tail++] = neighbor;
     });
   }
-  return refineConnectedMask({ width, height, data: selected, selectedCount }, pixels, seed, seedThreshold, maxSelected);
+  return refineConnectedMask({ width, height, data: selected, selectedCount, overflowed }, pixels, seed, seedThreshold, maxSelected);
 }
 
 function mergeMaterialMasks(existing, incoming) {
@@ -2087,6 +2131,7 @@ function completeLassoPath(assignment, kind, root) {
 function addLassoPoint(assignment, kind, point, event, root) {
   const existing = lassoDraftFor(assignment, kind);
   if (!existing) {
+    if (kind === 'source') assignment.selectionTouched = true;
     const operation = event.altKey ? 'subtract' : (event.ctrlKey || event.metaKey || event.shiftKey) ? 'add' : 'replace';
     if (operation === 'replace') {
       lassoSettings(assignment, kind).clear();
@@ -2114,12 +2159,13 @@ async function applyMagicWandSelection(assignment, kind, point, root, options = 
   if (output) output.textContent = '\ub9c8\uc220\ubd09\uc73c\ub85c \uc0c9\uc0c1\uacfc \ud1a4\uc774 \ube44\uc2b7\ud55c \uc5f0\uacb0 \uc601\uc5ed\uc744 \uac80\uc0c9\ud558\ub294 \uc911...';
   try {
     const mask = await createConnectedPixelMask(settings.image, point, settings.tolerance, {
-      maxCoverage: settings.maxCoverage,
-      bounds: settings.selection
+      maxCoverage: settings.maxCoverage
     });
     if (!mask.selectedCount) throw new Error('\uc120\ud0dd\ud560 \uc720\uc0ac \uc601\uc5ed\uc774 \uc5c6\uc2b5\ub2c8\ub2e4.');
+    if (mask.overflowed) throw new Error('\uc120\ud0dd \ubc94\uc704\uac00 \ub108\ubb34 \ub113\uc2b5\ub2c8\ub2e4. \ud1a8\ub7ec\ub7f0\uc2a4\ub97c \ub0ae\ucd94\uac70\ub098 \ube0c\ub7ec\uc26c\u00b7\ub2e4\uac01\ud615 \ub3c4\uad6c\ub85c \uacbd\uacc4\ub97c \ucd94\uac00\ud574\uc8fc\uc138\uc694.');
     const currentMask = kind === 'swatch' ? assignment.materialAutoMask : assignment.autoMask;
-    const isAdditive = Boolean(options.additive);
+    const hasExistingSelection = hasMaterialSelection(assignment, kind);
+    const isAdditive = Boolean(options.additive) || (hasExistingSelection && !materialMaskContainsPoint(currentMask, point));
     const isSubtractive = Boolean(options.subtractive);
     const shouldToggleOff = !isAdditive && !isSubtractive && materialMaskContainsPoint(currentMask, point);
     const nextMask = isSubtractive || shouldToggleOff
@@ -2129,13 +2175,14 @@ async function applyMagicWandSelection(assignment, kind, point, root, options = 
       : mask;
     if (kind === 'swatch') {
       assignment.materialAutoMask = nextMask;
-      if (!isAdditive) {
+      if (!isAdditive && !hasExistingSelection) {
         assignment.materialMaskStrokes = [];
         assignment.materialMaskPaths = [];
       }
     } else {
+      assignment.selectionTouched = true;
       assignment.autoMask = nextMask;
-      if (!isAdditive) {
+      if (!isAdditive && !hasExistingSelection) {
         assignment.maskStrokes = [];
         assignment.maskPaths = [];
       }
@@ -2154,6 +2201,7 @@ function refreshMaterialSelectionUi(root, assignment, kind = 'source') {
   if (!root || !assignment) return;
   ensureMaterialSelectionHistory(assignment);
   root.classList.toggle('has-selection', hasMaterialSelection(assignment, kind));
+  if (kind === 'source') root.classList.toggle('selection-cleared', Boolean(assignment.selectionTouched) && !hasMaterialSelection(assignment, kind));
   if (kind === 'swatch') updateMaterialSwatchSelectionUi(root, assignment);
   else updateMaterialAssignmentSelectionUi(root, assignment);
   drawMaterialSelectionCanvas(root.querySelector(kind === 'swatch' ? '[data-material-swatch-canvas]' : '[data-material-selection-canvas]'), assignment, kind);
@@ -2196,6 +2244,7 @@ function bindMaterialSelectionCanvases() {
       const additive = event.ctrlKey || event.metaKey || event.shiftKey;
       const subtractive = event.altKey;
       if (!additive && !subtractive) {
+        assignment.selectionTouched = true;
         assignment.autoMask = null;
         assignment.maskStrokes = [];
         assignment.maskPaths = [];
@@ -2536,9 +2585,18 @@ async function handleAction(button) {
   else if (action === 'demo-login') {
     const data = await api('/api/v1/auth/demo', { method: 'POST', body: '{}' }); resetUserState(); state.user = data.user; notify('테스트 계정으로 로그인했습니다.'); navigate('/dashboard', { replace: true });
   }
-  else if (action === 'open-upload' || action === 'new-project' || action === 'retry-project') { rememberFocus(button); state.analysisError = null; state.analysisPhase = null; if (location.pathname !== '/dashboard') { navigate('/dashboard'); setTimeout(() => { state.uploadOpen = true; document.body.classList.add('modal-open'); app.innerHTML = renderDashboard(); bindPage(); }, 0); } else { state.uploadOpen = true; document.body.classList.add('modal-open'); app.innerHTML = renderDashboard(); bindPage(); } }
-  else if (action === 'close-upload') { state.uploadOpen = false; state.analyzing = false; state.analysisError = null; state.analysisPhase = null; document.body.classList.remove('modal-open'); app.innerHTML = renderDashboard(); bindPage(); restoreFocus(); }
-  else if (action === 'backdrop-close') { state.uploadOpen = false; state.analyzing = false; state.analysisError = null; state.analysisPhase = null; document.body.classList.remove('modal-open'); app.innerHTML = renderDashboard(); bindPage(); restoreFocus(); }
+  else if (action === 'open-upload' || action === 'new-project' || action === 'retry-project') { rememberFocus(button); clearAnalysisFailure(); state.analysisPhase = null; if (location.pathname !== '/dashboard') { navigate('/dashboard'); setTimeout(() => { state.uploadOpen = true; document.body.classList.add('modal-open'); app.innerHTML = renderDashboard(); bindPage(); }, 0); } else { state.uploadOpen = true; document.body.classList.add('modal-open'); app.innerHTML = renderDashboard(); bindPage(); } }
+  else if (action === 'close-upload') { state.uploadOpen = false; state.analyzing = false; clearAnalysisFailure(); state.analysisPhase = null; document.body.classList.remove('modal-open'); app.innerHTML = renderDashboard(); bindPage(); restoreFocus(); }
+  else if (action === 'backdrop-close') { state.uploadOpen = false; state.analyzing = false; clearAnalysisFailure(); state.analysisPhase = null; document.body.classList.remove('modal-open'); app.innerHTML = renderDashboard(); bindPage(); restoreFocus(); }
+  else if (action === 'analysis-login') {
+    state.user = null;
+    navigate(`/login?returnTo=${encodeURIComponent('/dashboard?resumeUpload=1')}`);
+  }
+  else if (action === 'dismiss-analysis-error') {
+    clearAnalysisFailure();
+    app.innerHTML = renderDashboard();
+    bindPage();
+  }
   else if (action === 'add-material-assignment') {
     if (state.upload.materialAssignments.length >= 12) return;
     const used = new Set(state.upload.materialAssignments.map((item) => item.target));
@@ -2560,6 +2618,7 @@ async function handleAction(button) {
     assignment.maskPaths = [];
     assignment.lassoDraft = null;
     assignment.autoMask = null;
+    assignment.selectionTouched = true;
     recordMaterialSelectionHistory(assignment);
     const root = document.querySelector(`[data-material-selection-root='${assignment.id}']`);
     refreshMaterialSelectionUi(root, assignment);
@@ -2581,9 +2640,17 @@ async function handleAction(button) {
   else if (action === 'material-assignments-analyze') {
     const { current, materialAssignments } = state.upload;
     if (!current || !materialAssignmentsReady() || state.analyzing) return;
+    if (materialAssignments.some((item) => item.selectionTouched && !hasMaterialSelection(item))) {
+      const error = new Error('\uc801\uc6a9 \uc601\uc5ed\uc774 \ube48 \uc790\uc7ac\uac00 \uc788\uc2b5\ub2c8\ub2e4. \uac01 \uc790\uc7ac\uc758 \uc801\uc6a9 \uc601\uc5ed\uc744 \ud074\ub9ad\ud558\uac70\ub098 \uadf8\ub824\uc8fc\uc138\uc694.');
+      notify(setAnalysisFailure(error));
+      app.innerHTML = renderDashboard();
+      bindPage();
+      revealAnalysisError();
+      return;
+    }
     try { validateAnalysisImages([current, ...materialAssignments.map((item) => item.upload)]); }
-    catch (error) { state.analysisError = analysisErrorMessage(error); notify(state.analysisError); app.innerHTML = renderDashboard(); bindPage(); revealAnalysisError(); return; }
-    state.analysisError = null;
+    catch (error) { notify(setAnalysisFailure(error)); app.innerHTML = renderDashboard(); bindPage(); revealAnalysisError(); return; }
+    clearAnalysisFailure();
     state.analysisPhase = 'preparing';
     state.analyzing = true;
     app.innerHTML = renderDashboard();
@@ -2628,7 +2695,7 @@ async function handleAction(button) {
       navigate(finalized.next || data.next || (finalized.project?.id ? `/reports/${encodeURIComponent(finalized.project.id)}` : '/projects'));
     } catch (error) {
       state.analyzing = false;
-      state.analysisError = analysisErrorMessage(error);
+      setAnalysisFailure(error);
       state.analysisPhase = null;
       app.innerHTML = renderDashboard();
       bindPage();
@@ -2638,19 +2705,19 @@ async function handleAction(button) {
   }
   else if (action === 'analyze') {
     if (!state.upload.current || !state.upload.reference || state.analyzing) return;
-    state.analysisError = null;
+    clearAnalysisFailure();
     state.analysisPhase = 'requesting';
     state.analyzing = true; app.innerHTML = renderDashboard(); bindPage();
     try {
       const data = await api('/api/v1/projects/analyze', { method: 'POST', body: JSON.stringify({ currentImage: state.upload.current.dataUrl, referenceImage: state.upload.reference.dataUrl }) });
       assertGeneratedProject(data);
-      state.project = data.project; state.upload = createUploadState(); state.analyzing = false; state.analysisError = null; state.analysisPhase = null; navigate(data.next);
-    } catch (error) { state.analyzing = false; state.analysisError = analysisErrorMessage(error); state.analysisPhase = null; app.innerHTML = renderDashboard(); bindPage(); revealAnalysisError(); notify(state.analysisError); }
+      state.project = data.project; state.upload = createUploadState(); state.analyzing = false; clearAnalysisFailure(); state.analysisPhase = null; navigate(data.next);
+    } catch (error) { state.analyzing = false; setAnalysisFailure(error); state.analysisPhase = null; app.innerHTML = renderDashboard(); bindPage(); revealAnalysisError(); notify(state.analysisError); }
   }
   else if (action === 'object-material-analyze') {
     const { current, material, targetObject, selection } = state.upload;
     if (!current || !material || state.analyzing) return;
-    state.analysisError = null;
+    clearAnalysisFailure();
     state.analysisPhase = 'requesting';
     state.analyzing = true; app.innerHTML = renderDashboard(); bindPage();
     try {
@@ -2669,10 +2736,10 @@ async function handleAction(button) {
       state.project = data.project;
       state.upload = createUploadState();
       state.analyzing = false;
-      state.analysisError = null;
+      clearAnalysisFailure();
       state.analysisPhase = null;
       navigate(data.next || (data.project?.id ? `/reports/${encodeURIComponent(data.project.id)}` : '/projects'));
-    } catch (error) { state.analyzing = false; state.analysisError = analysisErrorMessage(error); state.analysisPhase = null; app.innerHTML = renderDashboard(); bindPage(); revealAnalysisError(); notify(state.analysisError); }
+    } catch (error) { state.analyzing = false; setAnalysisFailure(error); state.analysisPhase = null; app.innerHTML = renderDashboard(); bindPage(); revealAnalysisError(); notify(state.analysisError); }
   }
   else if (action === 'rollback-baseline') await rollbackToBaseline(button);
   else if (action === 'open-version-analyze') await openVersionAnalyze(button);
@@ -2740,7 +2807,15 @@ function bindPage() {
   loginForm?.addEventListener('submit', async (event) => {
     event.preventDefault(); const errorBox = document.querySelector('#auth-error'); errorBox.textContent = '';
     const form = new FormData(loginForm);
-    try { const data = await api('/api/v1/auth/login', { method: 'POST', body: JSON.stringify({ email: form.get('email'), password: form.get('password'), remember: Boolean(form.get('remember')) }) }); resetUserState(); state.user = data.user; navigate('/dashboard', { replace: true }); }
+    try {
+      const data = await api('/api/v1/auth/login', { method: 'POST', body: JSON.stringify({ email: form.get('email'), password: form.get('password'), remember: Boolean(form.get('remember')) }) });
+      const returnTo = requestedLoginReturnTo();
+      const resumeUpload = new URL(returnTo, location.origin).searchParams.get('resumeUpload') === '1';
+      if (!resumeUpload) resetUserState();
+      else { clearAnalysisFailure(); state.analysisPhase = null; }
+      state.user = data.user;
+      navigate(returnTo, { replace: true });
+    }
     catch (error) { errorBox.textContent = error.message; }
   });
   const signupForm = document.querySelector('#signup-form');
@@ -2760,6 +2835,7 @@ function bindPage() {
     assignment.maskPaths = [];
     assignment.lassoDraft = null;
     assignment.autoMask = null;
+    assignment.selectionTouched = false;
     app.innerHTML = renderDashboard();
     bindPage();
   }));
@@ -2819,7 +2895,7 @@ function bindPage() {
   document.querySelectorAll('[data-material-upload]').forEach((input) => input.addEventListener('change', async () => {
     const assignment = findMaterialAssignment(input.dataset.materialUpload);
     if (!assignment) return;
-    state.analysisError = null;
+    clearAnalysisFailure();
     try {
       assignment.upload = await readFile(input.files[0]);
       assignment.materialMaskStrokes = [];
@@ -2836,7 +2912,7 @@ function bindPage() {
     zone.addEventListener('drop', async (event) => {
       const assignment = findMaterialAssignment(zone.dataset.materialDrop);
       if (!assignment) return;
-      state.analysisError = null;
+      clearAnalysisFailure();
       try {
         assignment.upload = await readFile(event.dataTransfer.files[0]);
         assignment.materialMaskStrokes = [];
@@ -2852,20 +2928,20 @@ function bindPage() {
     if (!input.checked) return;
     state.upload.mode = input.value;
     state.analyzing = false;
-    state.analysisError = null;
+    clearAnalysisFailure();
     state.analysisPhase = null;
     app.innerHTML = renderDashboard();
     bindPage();
   }));
   document.querySelectorAll('[data-upload]').forEach((input) => input.addEventListener('change', async () => {
-    state.analysisError = null;
+    clearAnalysisFailure();
     try { await setUploadFile(input.dataset.upload, input.files[0]); app.innerHTML = renderDashboard(); bindPage(); }
     catch (error) { notify(error.message); }
   }));
   document.querySelectorAll('[data-drop]').forEach((zone) => {
     for (const type of ['dragenter','dragover']) zone.addEventListener(type, (event) => { event.preventDefault(); zone.classList.add('dragging'); });
     for (const type of ['dragleave','drop']) zone.addEventListener(type, (event) => { event.preventDefault(); zone.classList.remove('dragging'); });
-    zone.addEventListener('drop', async (event) => { state.analysisError = null; try { await setUploadFile(zone.dataset.drop, event.dataTransfer.files[0]); app.innerHTML = renderDashboard(); bindPage(); } catch (error) { notify(error.message); } });
+    zone.addEventListener('drop', async (event) => { clearAnalysisFailure(); try { await setUploadFile(zone.dataset.drop, event.dataTransfer.files[0]); app.innerHTML = renderDashboard(); bindPage(); } catch (error) { notify(error.message); } });
   });
   document.querySelectorAll('[data-version-reference]').forEach((input) => input.addEventListener('change', async () => {
     const modal = state.versionModal;

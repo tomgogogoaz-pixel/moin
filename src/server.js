@@ -5,13 +5,16 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { openDatabase, closeDatabase, publicUser } from './database.js';
+import { hasSupabaseConfiguration, isSupabaseMedia, openSupabaseDatabase } from './supabase-database.js';
 import { createAiProvider, imageDimensions } from './services/ai.js';
 import {
+  createSignedSessionToken,
   createSessionToken,
   hashPassword,
   hashToken,
   normalizeEmail,
   parseCookies,
+  verifySignedSessionToken,
   verifyPassword
 } from './security.js';
 
@@ -125,36 +128,63 @@ function sessionCookie(rawToken, maxAgeSeconds) {
   return `${SESSION_COOKIE}=${encodeURIComponent(rawToken)}; HttpOnly; Path=/; SameSite=Lax${maxAge}${secure}`;
 }
 
-function getUser(db, req) {
+function demoSessionSecret() {
+  const secret = String(ENV.MOIN_SESSION_SECRET || '');
+  return secret.length >= 32 ? secret : null;
+}
+
+function useStatelessDemoSession() {
+  return ENV.NODE_ENV === 'production' && ENV.ENABLE_DEMO_AUTH === 'true' && Boolean(demoSessionSecret());
+}
+
+function startDemoSession(email, persistent = true) {
+  const maxAge = persistent ? SESSION_DAYS * 86400 : 86400;
+  return {
+    rawToken: createSignedSessionToken({
+      aud: 'moin-demo',
+      email,
+      exp: Date.now() + (maxAge * 1000)
+    }, demoSessionSecret()),
+    maxAge: persistent ? maxAge : null
+  };
+}
+
+async function getUser(db, req) {
   const rawToken = parseCookies(req.headers.cookie)[SESSION_COOKIE];
   if (!rawToken) return null;
+  if (useStatelessDemoSession()) {
+    const payload = verifySignedSessionToken(rawToken, demoSessionSecret());
+    if (payload?.aud === 'moin-demo' && payload.email === 'demo@moin.local') {
+      return await db.prepare('SELECT id, email, name FROM users WHERE email = ?').get(payload.email) || null;
+    }
+  }
   const now = new Date().toISOString();
-  db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(now);
+  await db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(now);
   const tokenHash = hashToken(rawToken);
-  const user = db.prepare(`
+  const user = await db.prepare(`
     SELECT u.id, u.email, u.name
     FROM sessions s JOIN users u ON u.id = s.user_id
     WHERE s.token_hash = ? AND s.expires_at > ?
   `).get(tokenHash, now) || null;
   if (user?.email === 'demo@moin.local' && ENV.NODE_ENV === 'production' && ENV.ENABLE_DEMO_AUTH !== 'true') {
-    db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
+    await db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
     return null;
   }
   return user;
 }
 
-function requireUser(db, req, res) {
-  const user = getUser(db, req);
+async function requireUser(db, req, res) {
+  const user = await getUser(db, req);
   if (!user) sendError(res, 401, 'AUTH_REQUIRED', '로그인이 필요합니다.');
   return user;
 }
 
-function startSession(db, userId, persistent = false) {
+async function startSession(db, userId, persistent = false) {
   const rawToken = createSessionToken();
   const now = new Date();
   const lifetimeDays = persistent ? SESSION_DAYS : 1;
   const expires = new Date(now.getTime() + lifetimeDays * 86400000);
-  db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)')
+  await db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)')
     .run(hashToken(rawToken), userId, expires.toISOString(), now.toISOString());
   return { rawToken, maxAge: persistent ? SESSION_DAYS * 86400 : null };
 }
@@ -173,13 +203,14 @@ function materialView(row) {
   };
 }
 
-function cartRows(db, userId) {
-  return db.prepare(`
+async function cartRows(db, userId) {
+  const rows = await db.prepare(`
     SELECT ci.id AS cart_id, ci.quantity, ci.selected,
            m.id, m.slug, m.category, m.name, m.description, m.unit, m.price, m.image_url, m.stock
     FROM cart_items ci JOIN materials m ON m.id = ci.material_id
     WHERE ci.user_id = ? ORDER BY ci.created_at DESC
-  `).all(userId).map((row) => ({
+  `).all(userId);
+  return rows.map((row) => ({
     cartId: row.cart_id,
     quantity: row.quantity,
     selected: Boolean(row.selected),
@@ -261,7 +292,8 @@ function validateAnalysisImageTotal(...images) {
   }
 }
 
-function writeImage(directory, image) {
+async function writeImage(directory, image, db) {
+  if (db?.storage) return db.storage.write(path.basename(directory), image);
   fs.mkdirSync(directory, { recursive: true });
   const extension = image.mimeType === 'image/png' ? '.png' : image.mimeType === 'image/webp' ? '.webp' : '.jpg';
   const filename = `${crypto.randomUUID()}${extension}`;
@@ -270,7 +302,11 @@ function writeImage(directory, image) {
   return destination;
 }
 
-function readStoredImage(filename) {
+async function readStoredImage(filename, db) {
+  if (db?.storage?.isManaged(filename)) {
+    const stored = await db.storage.read(filename);
+    return decodeImage(`data:${stored.mimeType};base64,${stored.buffer.toString('base64')}`);
+  }
   if (!filename || filename.startsWith('/assets/') || !fs.existsSync(filename)) {
     throw Object.assign(new Error('원본 스케치 파일을 찾을 수 없습니다.'), { status: 409 });
   }
@@ -416,7 +452,7 @@ function projectVersionView(version, activeVersionId) {
   };
 }
 
-function createProjectVersion(db, {
+async function createProjectVersion(db, {
   projectId,
   kind,
   status = 'completed',
@@ -431,19 +467,19 @@ function createProjectVersion(db, {
   analysis = {},
   createdAt = new Date().toISOString()
 }) {
-  const next = db.prepare('SELECT COALESCE(MAX(version_number), -1) + 1 AS value FROM project_versions WHERE project_id = ?').get(projectId);
+  const next = await db.prepare('SELECT COALESCE(MAX(version_number), -1) + 1 AS value FROM project_versions WHERE project_id = ?').get(projectId);
   const id = crypto.randomUUID();
-  db.prepare(`INSERT INTO project_versions
+  await db.prepare(`INSERT INTO project_versions
     (id, project_id, version_number, kind, status, parent_version_id, before_image_path, reference_image_path, floor_material_image_path, wall_material_image_path, object_material_image_path, object_mask_image_path, result_after_path, analysis_json, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(id, projectId, Number(next?.value || 0), kind, status, parentVersionId, beforeImagePath, referenceImagePath, floorMaterialImagePath, wallMaterialImagePath, objectMaterialImagePath, objectMaskImagePath, resultAfterPath, JSON.stringify(analysis || {}), createdAt);
-  return db.prepare('SELECT * FROM project_versions WHERE id = ?').get(id);
+  return await db.prepare('SELECT * FROM project_versions WHERE id = ?').get(id);
 }
 
-function ensureBaselineProjectVersion(db, project) {
-  let baseline = db.prepare("SELECT * FROM project_versions WHERE project_id = ? AND kind = 'baseline' ORDER BY version_number ASC LIMIT 1").get(project.id);
+async function ensureBaselineProjectVersion(db, project) {
+  let baseline = await db.prepare("SELECT * FROM project_versions WHERE project_id = ? AND kind = 'baseline' ORDER BY version_number ASC LIMIT 1").get(project.id);
   if (baseline) return baseline;
-  baseline = createProjectVersion(db, {
+  baseline = await createProjectVersion(db, {
     projectId: project.id,
     kind: 'baseline',
     beforeImagePath: project.current_image_path,
@@ -462,13 +498,13 @@ function ensureBaselineProjectVersion(db, project) {
   return baseline;
 }
 
-function latestProjectVersion(db, projectId) {
-  return db.prepare('SELECT * FROM project_versions WHERE project_id = ? ORDER BY version_number DESC LIMIT 1').get(projectId) || null;
+async function latestProjectVersion(db, projectId) {
+  return await db.prepare('SELECT * FROM project_versions WHERE project_id = ? ORDER BY version_number DESC LIMIT 1').get(projectId) || null;
 }
 
-function ensureProjectVersionHistory(db, project) {
-  const baseline = ensureBaselineProjectVersion(db, project);
-  const count = Number(db.prepare('SELECT COUNT(*) AS count FROM project_versions WHERE project_id = ?').get(project.id)?.count || 0);
+async function ensureProjectVersionHistory(db, project) {
+  const baseline = await ensureBaselineProjectVersion(db, project);
+  const count = Number((await db.prepare('SELECT COUNT(*) AS count FROM project_versions WHERE project_id = ?').get(project.id))?.count || 0);
   if (count === 1 && project.status !== 'failed' && (
     project.result_after_path
     || project.reference_image_path
@@ -476,7 +512,7 @@ function ensureProjectVersionHistory(db, project) {
     || project.wall_material_image_path
     || project.object_material_image_path
   )) {
-    createProjectVersion(db, {
+    await createProjectVersion(db, {
       projectId: project.id,
       kind: 'generation',
       parentVersionId: baseline.id,
@@ -494,8 +530,8 @@ function ensureProjectVersionHistory(db, project) {
   return baseline;
 }
 
-function ownedProject(db, projectId, userId) {
-  return db.prepare('SELECT * FROM projects WHERE id = ? AND user_id = ?').get(projectId, userId) || null;
+async function ownedProject(db, projectId, userId) {
+  return await db.prepare('SELECT * FROM projects WHERE id = ? AND user_id = ?').get(projectId, userId) || null;
 }
 
 function isInsideDirectory(filename, directory) {
@@ -505,10 +541,11 @@ function isInsideDirectory(filename, directory) {
 
 function isManagedProjectMedia(filename, dataDir) {
   if (!filename || filename.startsWith('/assets/')) return false;
+  if (isSupabaseMedia(filename)) return true;
   return ['uploads', 'generated'].some((folder) => isInsideDirectory(filename, path.join(dataDir, folder)));
 }
 
-function removeUnreferencedProjectMedia(db, dataDir, filenames) {
+async function removeUnreferencedProjectMedia(db, dataDir, filenames) {
   const projectReferences = db.prepare(`
     SELECT COUNT(*) AS count
     FROM projects
@@ -533,9 +570,14 @@ function removeUnreferencedProjectMedia(db, dataDir, filenames) {
   `);
 
   for (const filename of new Set(filenames.filter((value) => isManagedProjectMedia(value, dataDir)))) {
-    const projectCount = Number(projectReferences.get(filename, filename, filename, filename, filename, filename, filename)?.count || 0);
-    const versionCount = Number(versionReferences.get(filename, filename, filename, filename, filename, filename, filename)?.count || 0);
-    if (projectCount + versionCount !== 0 || !fs.existsSync(filename)) continue;
+    const projectCount = Number((await projectReferences.get(filename, filename, filename, filename, filename, filename, filename))?.count || 0);
+    const versionCount = Number((await versionReferences.get(filename, filename, filename, filename, filename, filename, filename))?.count || 0);
+    if (projectCount + versionCount !== 0) continue;
+    if (db?.storage?.isManaged(filename)) {
+      try { await db.storage.remove(filename); } catch { /* Stale media can be cleaned up later. */ }
+      continue;
+    }
+    if (!fs.existsSync(filename)) continue;
     try { fs.unlinkSync(filename); } catch { /* The project row is already removed; stale media can be cleaned up later. */ }
   }
 }
@@ -543,20 +585,21 @@ function removeUnreferencedProjectMedia(db, dataDir, filenames) {
 async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage }) {
   const method = req.method || 'GET';
   const pathname = url.pathname;
+  if (db?.ready) await db.ready;
 
   if (method === 'GET' && pathname === '/api/health') {
-    sendJson(res, 200, { data: { status: 'ok', database: 'sqlite', ai: aiProvider.constructor.name } });
+    sendJson(res, 200, { data: { status: 'ok', database: db?.provider || 'sqlite', ai: aiProvider.constructor.name } });
     return true;
   }
 
   if (method === 'GET' && pathname === '/api/v1/landing/start') {
-    const user = getUser(db, req);
+    const user = await getUser(db, req);
     sendJson(res, 200, { data: { authenticated: Boolean(user), next: user ? '/dashboard' : '/login' } });
     return true;
   }
 
   if (method === 'GET' && pathname === '/api/v1/auth/me') {
-    sendJson(res, 200, { data: { user: publicUser(getUser(db, req)) } });
+    sendJson(res, 200, { data: { user: publicUser(await getUser(db, req)) } });
     return true;
   }
 
@@ -574,13 +617,13 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
       sendError(res, 400, 'VALIDATION_ERROR', '입력 내용을 확인해주세요.', errors);
       return true;
     }
-    if (db.prepare('SELECT id FROM users WHERE email = ?').get(email)) {
+    if (await db.prepare('SELECT id FROM users WHERE email = ?').get(email)) {
       sendError(res, 409, 'EMAIL_EXISTS', '이미 가입된 이메일입니다.');
       return true;
     }
     const id = crypto.randomUUID();
     const acceptedAt = new Date().toISOString();
-    db.prepare('INSERT INTO users (id, email, name, password_hash, auth_provider, terms_accepted_at, terms_version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    await db.prepare('INSERT INTO users (id, email, name, password_hash, auth_provider, terms_accepted_at, terms_version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
       .run(id, email, name, hashPassword(password), 'local', acceptedAt, TERMS_VERSION, acceptedAt);
     sendJson(res, 201, { data: { user: { id, email, name }, next: '/login' } });
     return true;
@@ -597,7 +640,7 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
       sendError(res, 400, 'VALIDATION_ERROR', '올바른 이메일을 입력해주세요.');
       return true;
     }
-    const row = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    const row = await db.prepare('SELECT * FROM users WHERE email = ?').get(email);
     if (row?.email === 'demo@moin.local' && ENV.NODE_ENV === 'production' && ENV.ENABLE_DEMO_AUTH !== 'true') {
       sendError(res, 403, 'DEMO_DISABLED', '운영 환경에서는 데모 로그인이 비활성화되어 있습니다.');
       return true;
@@ -606,7 +649,9 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
       sendError(res, 401, 'INVALID_CREDENTIALS', '이메일 또는 비밀번호를 확인해주세요.');
       return true;
     }
-    const session = startSession(db, row.id, body.remember === true);
+    const session = row.email === 'demo@moin.local' && useStatelessDemoSession()
+      ? startDemoSession(row.email, true)
+      : await startSession(db, row.id, body.remember === true);
     sendJson(res, 200, { data: { user: publicUser(row), next: '/dashboard' } }, {
       'set-cookie': sessionCookie(session.rawToken, session.maxAge)
     });
@@ -618,8 +663,8 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
       sendError(res, 403, 'DEMO_DISABLED', '운영 환경에서는 데모 로그인이 비활성화되어 있습니다.');
       return true;
     }
-    const row = db.prepare('SELECT * FROM users WHERE email = ?').get('demo@moin.local');
-    const session = startSession(db, row.id, true);
+    const row = await db.prepare('SELECT * FROM users WHERE email = ?').get('demo@moin.local');
+    const session = useStatelessDemoSession() ? startDemoSession(row.email, true) : await startSession(db, row.id, true);
     sendJson(res, 200, { data: { user: publicUser(row), next: '/dashboard' } }, {
       'set-cookie': sessionCookie(session.rawToken, session.maxAge)
     });
@@ -628,7 +673,7 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
 
   if (method === 'POST' && pathname === '/api/v1/auth/logout') {
     const rawToken = parseCookies(req.headers.cookie)[SESSION_COOKIE];
-    if (rawToken) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(hashToken(rawToken));
+    if (rawToken) await db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(hashToken(rawToken));
     sendJson(res, 200, { data: { success: true } }, { 'set-cookie': sessionCookie('', 0) });
     return true;
   }
@@ -643,16 +688,16 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
     if (search) { filters.push('(name LIKE ? OR description LIKE ?)'); values.push(`%${search}%`, `%${search}%`); }
     if (maxPrice > 0) { filters.push('price <= ?'); values.push(maxPrice); }
     const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
-    const rows = db.prepare(`SELECT * FROM materials ${where} ORDER BY created_at, name`).all(...values);
+    const rows = await db.prepare(`SELECT * FROM materials ${where} ORDER BY created_at, name`).all(...values);
     sendJson(res, 200, { data: { materials: rows.map(materialView) } });
     return true;
   }
 
   if (pathname === '/api/v1/cart') {
-    const user = requireUser(db, req, res);
+    const user = await requireUser(db, req, res);
     if (!user) return true;
     if (method === 'GET') {
-      const items = cartRows(db, user.id);
+      const items = await cartRows(db, user.id);
       sendJson(res, 200, { data: { items, total: items.filter((item) => item.selected).reduce((sum, item) => sum + item.lineTotal, 0) } });
       return true;
     }
@@ -663,13 +708,13 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
         sendError(res, 400, 'INVALID_QUANTITY', '수량은 1부터 99 사이의 정수여야 합니다.');
         return true;
       }
-      const material = db.prepare('SELECT id FROM materials WHERE id = ?').get(body.materialId);
+      const material = await db.prepare('SELECT id FROM materials WHERE id = ?').get(body.materialId);
       if (!material) { sendError(res, 404, 'MATERIAL_NOT_FOUND', '상품을 찾을 수 없습니다.'); return true; }
-      const existing = db.prepare('SELECT id, quantity FROM cart_items WHERE user_id = ? AND material_id = ?').get(user.id, material.id);
-      if (existing) db.prepare('UPDATE cart_items SET quantity = ? WHERE id = ?').run(Math.min(existing.quantity + requestedQuantity, 99), existing.id);
-      else db.prepare('INSERT INTO cart_items (id, user_id, material_id, quantity, selected, created_at) VALUES (?, ?, ?, ?, 1, ?)')
+      const existing = await db.prepare('SELECT id, quantity FROM cart_items WHERE user_id = ? AND material_id = ?').get(user.id, material.id);
+      if (existing) await db.prepare('UPDATE cart_items SET quantity = ? WHERE id = ?').run(Math.min(existing.quantity + requestedQuantity, 99), existing.id);
+      else await db.prepare('INSERT INTO cart_items (id, user_id, material_id, quantity, selected, created_at) VALUES (?, ?, ?, ?, 1, ?)')
         .run(crypto.randomUUID(), user.id, material.id, requestedQuantity, new Date().toISOString());
-      const items = cartRows(db, user.id);
+      const items = await cartRows(db, user.id);
       sendJson(res, 200, { data: { items } });
       return true;
     }
@@ -677,9 +722,9 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
 
   const cartMatch = pathname.match(/^\/api\/v1\/cart\/items\/([^/]+)$/);
   if (cartMatch) {
-    const user = requireUser(db, req, res);
+    const user = await requireUser(db, req, res);
     if (!user) return true;
-    const item = db.prepare('SELECT * FROM cart_items WHERE id = ? AND user_id = ?').get(cartMatch[1], user.id);
+    const item = await db.prepare('SELECT * FROM cart_items WHERE id = ? AND user_id = ?').get(cartMatch[1], user.id);
     if (!item) { sendError(res, 404, 'CART_ITEM_NOT_FOUND', '장바구니 항목을 찾을 수 없습니다.'); return true; }
     if (method === 'PATCH') {
       const body = await readJson(req);
@@ -694,35 +739,35 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
         sendError(res, 400, 'INVALID_SELECTION', '선택 상태는 true 또는 false여야 합니다.');
         return true;
       }
-      db.prepare('UPDATE cart_items SET quantity = ?, selected = ? WHERE id = ?')
+      await db.prepare('UPDATE cart_items SET quantity = ?, selected = ? WHERE id = ?')
         .run(quantity, hasSelected ? Number(body.selected) : item.selected, item.id);
-      sendJson(res, 200, { data: { items: cartRows(db, user.id) } });
+      sendJson(res, 200, { data: { items: await cartRows(db, user.id) } });
       return true;
     }
     if (method === 'DELETE') {
-      db.prepare('DELETE FROM cart_items WHERE id = ?').run(item.id);
-      sendJson(res, 200, { data: { items: cartRows(db, user.id) } });
+      await db.prepare('DELETE FROM cart_items WHERE id = ?').run(item.id);
+      sendJson(res, 200, { data: { items: await cartRows(db, user.id) } });
       return true;
     }
   }
 
   if (method === 'POST' && pathname === '/api/v1/orders') {
-    const user = requireUser(db, req, res);
+    const user = await requireUser(db, req, res);
     if (!user) return true;
-    const items = cartRows(db, user.id).filter((item) => item.selected);
+    const items = (await cartRows(db, user.id)).filter((item) => item.selected);
     if (!items.length) { sendError(res, 400, 'EMPTY_CART', '선택된 상품이 없습니다.'); return true; }
     const total = items.reduce((sum, item) => sum + item.lineTotal, 0);
     const orderId = crypto.randomUUID();
-    db.exec('BEGIN');
+    await db.exec('BEGIN');
     try {
-      db.prepare('INSERT INTO orders (id, user_id, total, status, created_at) VALUES (?, ?, ?, ?, ?)')
+      await db.prepare('INSERT INTO orders (id, user_id, total, status, created_at) VALUES (?, ?, ?, ?, ?)')
         .run(orderId, user.id, total, 'demo_completed', new Date().toISOString());
       const insertItem = db.prepare('INSERT INTO order_items (id, order_id, material_id, name_snapshot, price_snapshot, quantity) VALUES (?, ?, ?, ?, ?, ?)');
-      for (const item of items) insertItem.run(crypto.randomUUID(), orderId, item.material.id, item.material.name, item.material.price, item.quantity);
-      db.prepare('DELETE FROM cart_items WHERE user_id = ? AND selected = 1').run(user.id);
-      db.exec('COMMIT');
+      for (const item of items) await insertItem.run(crypto.randomUUID(), orderId, item.material.id, item.material.name, item.material.price, item.quantity);
+      await db.prepare('DELETE FROM cart_items WHERE user_id = ? AND selected = 1').run(user.id);
+      await db.exec('COMMIT');
     } catch (error) {
-      db.exec('ROLLBACK');
+      await db.exec('ROLLBACK');
       throw error;
     }
     sendJson(res, 201, { data: { order: { id: orderId, total, status: 'demo_completed' } } });
@@ -730,9 +775,9 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
   }
 
   if (method === 'GET' && pathname === '/api/v1/projects') {
-    const user = requireUser(db, req, res);
+    const user = await requireUser(db, req, res);
     if (!user) return true;
-    const projects = db.prepare('SELECT * FROM projects WHERE user_id = ? ORDER BY updated_at DESC').all(user.id).map(projectView);
+    const projects = (await db.prepare('SELECT * FROM projects WHERE user_id = ? ORDER BY updated_at DESC').all(user.id)).map(projectView);
     sendJson(res, 200, { data: { projects } });
     return true;
   }
@@ -742,7 +787,7 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
     || pathname === '/api/v1/generate'
     || pathname === '/api/v1/generate/object-material'
   )) {
-    const user = requireUser(db, req, res);
+    const user = await requireUser(db, req, res);
     if (!user) return true;
     const maximum = Math.max(1, Number(ENV.AI_ANALYZE_LIMIT_PER_HOUR) || 20);
     if (!consumeHourlyLimit(analysisUsage, user.id, maximum)) {
@@ -819,27 +864,27 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
     );
     const uploadsDir = path.join(dataDir, 'uploads');
     const generatedDir = path.join(dataDir, 'generated');
-    const currentPath = writeImage(uploadsDir, current);
-    const referencePath = reference ? writeImage(uploadsDir, reference) : null;
-    const floorMaterialPath = floorMaterial ? writeImage(uploadsDir, floorMaterial) : null;
-    const wallMaterialPath = wallMaterial ? writeImage(uploadsDir, wallMaterial) : null;
-    const objectMaterialPath = objectMaterial ? writeImage(uploadsDir, objectMaterial) : null;
-    const objectMaskPath = objectMask ? writeImage(uploadsDir, objectMask) : null;
-    const targetMaterialPaths = (targetMaterials || []).map(({ target, image, mask, materialMask }) => ({
+    const currentPath = await writeImage(uploadsDir, current, db);
+    const referencePath = reference ? await writeImage(uploadsDir, reference, db) : null;
+    const floorMaterialPath = floorMaterial ? await writeImage(uploadsDir, floorMaterial, db) : null;
+    const wallMaterialPath = wallMaterial ? await writeImage(uploadsDir, wallMaterial, db) : null;
+    const objectMaterialPath = objectMaterial ? await writeImage(uploadsDir, objectMaterial, db) : null;
+    const objectMaskPath = objectMask ? await writeImage(uploadsDir, objectMask, db) : null;
+    const targetMaterialPaths = await Promise.all((targetMaterials || []).map(async ({ target, image, mask, materialMask }) => ({
       target,
-      path: writeImage(uploadsDir, image),
-      maskPath: mask ? writeImage(uploadsDir, mask) : null,
-      materialMaskPath: materialMask ? writeImage(uploadsDir, materialMask) : null
-    }));
+      path: await writeImage(uploadsDir, image, db),
+      maskPath: mask ? await writeImage(uploadsDir, mask, db) : null,
+      materialMaskPath: materialMask ? await writeImage(uploadsDir, materialMask, db) : null
+    })));
     const materialInputPaths = targetMaterialPaths.flatMap(({ path: filename, maskPath, materialMaskPath }) => [filename, maskPath, materialMaskPath].filter(Boolean));
     const projectId = crypto.randomUUID();
     const now = new Date().toISOString();
     const projectTitle = targetMaterialMode ? 'Target material application project' : objectMode ? `${targetObject} material application project` : materialMode ? 'Material inpainting project' : 'Space analysis project';
-    db.prepare(`INSERT INTO projects
+    await db.prepare(`INSERT INTO projects
       (id, user_id, title, status, current_image_path, reference_image_path, floor_material_image_path, wall_material_image_path, object_material_image_path, object_mask_image_path, result_after_path, analysis_json, created_at, updated_at)
       VALUES (?, ?, ?, 'analyzing', ?, ?, ?, ?, ?, ?, NULL, '{}', ?, ?)`)
       .run(projectId, user.id, projectTitle, currentPath, referencePath, floorMaterialPath, wallMaterialPath, objectMaterialPath, objectMaskPath, now, now);
-    const baselineVersion = ensureBaselineProjectVersion(db, ownedProject(db, projectId, user.id));
+    const baselineVersion = await ensureBaselineProjectVersion(db, await ownedProject(db, projectId, user.id));
     try {
       const result = await aiProvider.analyze({ current, reference, floorMaterial, wallMaterial, objectMaterial, mask: objectMask, targetObject, selection, targetMaterials });
       if (!result || typeof result !== 'object') throw new Error('AI provider returned an invalid result');
@@ -854,7 +899,7 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
       if (result.after?.base64) {
         if (afterPath) throw new Error('AI provider returned conflicting after-image sources');
         const afterImage = decodeImage(`data:${result.after.mimeType || 'image/png'};base64,${result.after.base64}`);
-        afterPath = writeImage(generatedDir, afterImage);
+        afterPath = await writeImage(generatedDir, afterImage, db);
       }
       if (!afterPath) throw new Error('AI provider did not return an after image or an explicit source preview');
       const safeResult = { ...result };
@@ -868,9 +913,9 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
           selection: targetMaterials[index]?.selection || null
         }));
       }
-      db.prepare('UPDATE projects SET status = ?, result_after_path = ?, analysis_json = ?, updated_at = ? WHERE id = ?')
+      await db.prepare('UPDATE projects SET status = ?, result_after_path = ?, analysis_json = ?, updated_at = ? WHERE id = ?')
         .run('completed', afterPath, JSON.stringify(safeResult), new Date().toISOString(), projectId);
-      createProjectVersion(db, {
+      await createProjectVersion(db, {
         projectId,
         kind: 'generation',
         parentVersionId: baselineVersion.id,
@@ -883,7 +928,7 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
         resultAfterPath: afterPath,
         analysis: safeResult
       });
-      const project = ownedProject(db, projectId, user.id);
+      const project = await ownedProject(db, projectId, user.id);
       if (!project) {
         throw Object.assign(new Error('분석 결과 프로젝트를 저장한 뒤 다시 읽지 못했습니다.'), {
           status: 500,
@@ -901,13 +946,13 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
           selection: targetMaterials[index]?.selection || null
         }))
       } : {});
-      db.prepare('UPDATE projects SET status = ?, result_after_path = NULL, analysis_json = ?, updated_at = ? WHERE id = ?')
+      await db.prepare('UPDATE projects SET status = ?, result_after_path = NULL, analysis_json = ?, updated_at = ? WHERE id = ?')
         .run('failed', JSON.stringify(failedAnalysis), new Date().toISOString(), projectId);
-      createProjectVersion(db, {
+      await createProjectVersion(db, {
         projectId,
         kind: 'generation',
         status: 'failed',
-        parentVersionId: latestProjectVersion(db, projectId)?.id || baselineVersion.id,
+        parentVersionId: (await latestProjectVersion(db, projectId))?.id || baselineVersion.id,
         beforeImagePath: currentPath,
         referenceImagePath: referencePath,
         floorMaterialImagePath: floorMaterialPath,
@@ -923,14 +968,14 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
 
   const replaceAfterMatch = pathname.match(/^\/api\/v1\/projects\/([^/]+)\/after$/);
   if (replaceAfterMatch && method === 'POST') {
-    const user = requireUser(db, req, res);
+    const user = await requireUser(db, req, res);
     if (!user) return true;
-    const project = ownedProject(db, replaceAfterMatch[1], user.id);
+    const project = await ownedProject(db, replaceAfterMatch[1], user.id);
     if (!project) { sendError(res, 404, 'PROJECT_NOT_FOUND', '프로젝트를 찾을 수 없습니다.'); return true; }
     const body = await readJson(req);
     if (!body.afterImage) throw inputError('보정할 시공 후 이미지가 필요합니다.');
     const afterImage = decodeImage(body.afterImage);
-    const sourceImage = readStoredImage(project.current_image_path);
+    const sourceImage = await readStoredImage(project.current_image_path, db);
     const sourceDimensions = imageDimensions(sourceImage);
     const afterDimensions = imageDimensions(afterImage);
     if (sourceDimensions?.width && sourceDimensions?.height && afterDimensions?.width && afterDimensions?.height
@@ -939,7 +984,7 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
     }
     const generatedDir = path.join(dataDir, 'generated');
     const previousAfterPath = project.result_after_path;
-    const afterPath = writeImage(generatedDir, afterImage);
+    const afterPath = await writeImage(generatedDir, afterImage, db);
     const analysis = parseJson(project.analysis_json);
     const compositeAnalysis = {
       ...analysis,
@@ -950,26 +995,26 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
         clientComposite: true
       }
     };
-    db.prepare('UPDATE projects SET result_after_path = ?, analysis_json = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+    await db.prepare('UPDATE projects SET result_after_path = ?, analysis_json = ?, updated_at = ? WHERE id = ? AND user_id = ?')
       .run(afterPath, JSON.stringify(compositeAnalysis), new Date().toISOString(), project.id, user.id);
-    const activeVersion = db.prepare("SELECT * FROM project_versions WHERE project_id = ? AND kind = 'generation' ORDER BY version_number DESC LIMIT 1").get(project.id);
+    const activeVersion = await db.prepare("SELECT * FROM project_versions WHERE project_id = ? AND kind = 'generation' ORDER BY version_number DESC LIMIT 1").get(project.id);
     if (activeVersion) {
-      db.prepare('UPDATE project_versions SET result_after_path = ?, analysis_json = ? WHERE id = ?')
+      await db.prepare('UPDATE project_versions SET result_after_path = ?, analysis_json = ? WHERE id = ?')
         .run(afterPath, JSON.stringify(compositeAnalysis), activeVersion.id);
     }
-    removeUnreferencedProjectMedia(db, dataDir, [previousAfterPath]);
-    sendJson(res, 200, { data: { project: projectView(ownedProject(db, project.id, user.id)) } });
+    await removeUnreferencedProjectMedia(db, dataDir, [previousAfterPath]);
+    sendJson(res, 200, { data: { project: projectView(await ownedProject(db, project.id, user.id)) } });
     return true;
   }
 
   const projectVersionsMatch = pathname.match(/^\/api\/v1\/projects\/([^/]+)\/versions$/);
   if (projectVersionsMatch && method === 'GET') {
-    const user = requireUser(db, req, res);
+    const user = await requireUser(db, req, res);
     if (!user) return true;
-    const project = ownedProject(db, projectVersionsMatch[1], user.id);
+    const project = await ownedProject(db, projectVersionsMatch[1], user.id);
     if (!project) { sendError(res, 404, 'PROJECT_NOT_FOUND', '프로젝트를 찾을 수 없습니다.'); return true; }
-    const baseline = ensureProjectVersionHistory(db, project);
-    const versions = db.prepare('SELECT * FROM project_versions WHERE project_id = ? ORDER BY version_number ASC').all(project.id);
+    const baseline = await ensureProjectVersionHistory(db, project);
+    const versions = await db.prepare('SELECT * FROM project_versions WHERE project_id = ? ORDER BY version_number ASC').all(project.id);
     const active = [...versions].reverse().find((version) => version.status === 'completed') || versions.at(-1) || null;
     sendJson(res, 200, {
       data: {
@@ -983,21 +1028,21 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
 
   const rollbackMatch = pathname.match(/^\/api\/v1\/projects\/([^/]+)\/rollback$/);
   if (rollbackMatch && method === 'POST') {
-    const user = requireUser(db, req, res);
+    const user = await requireUser(db, req, res);
     if (!user) return true;
-    const project = ownedProject(db, rollbackMatch[1], user.id);
+    const project = await ownedProject(db, rollbackMatch[1], user.id);
     if (!project) { sendError(res, 404, 'PROJECT_NOT_FOUND', '프로젝트를 찾을 수 없습니다.'); return true; }
     if (project.status === 'analyzing') { sendError(res, 409, 'PROJECT_ANALYZING', '분석이 완료된 뒤 롤백할 수 있습니다.'); return true; }
     const body = await readJson(req);
-    const baseline = ensureProjectVersionHistory(db, project);
+    const baseline = await ensureProjectVersionHistory(db, project);
     const requestedVersionId = typeof body.versionId === 'string' ? body.versionId.trim() : '';
     const target = requestedVersionId
-      ? db.prepare('SELECT * FROM project_versions WHERE id = ? AND project_id = ?').get(requestedVersionId, project.id)
+      ? await db.prepare('SELECT * FROM project_versions WHERE id = ? AND project_id = ?').get(requestedVersionId, project.id)
       : baseline;
     if (!target) { sendError(res, 404, 'VERSION_NOT_FOUND', '복원할 버전을 찾을 수 없습니다.'); return true; }
     if (target.status !== 'completed') { sendError(res, 409, 'VERSION_NOT_READY', '완료된 버전만 복원할 수 있습니다.'); return true; }
     const restoredAfterPath = target.result_after_path || project.current_image_path;
-    if (!restoredAfterPath || (!restoredAfterPath.startsWith('/assets/') && !fs.existsSync(restoredAfterPath))) {
+    if (!restoredAfterPath || (!restoredAfterPath.startsWith('/assets/') && !db?.storage?.isManaged(restoredAfterPath) && !fs.existsSync(restoredAfterPath))) {
       sendError(res, 409, 'VERSION_MEDIA_MISSING', '복원할 이미지 파일을 찾을 수 없습니다.');
       return true;
     }
@@ -1023,13 +1068,13 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
         rollback: true
       }
     };
-    const parentVersion = latestProjectVersion(db, project.id);
+    const parentVersion = await latestProjectVersion(db, project.id);
     const now = new Date().toISOString();
-    db.prepare(`UPDATE projects
+    await db.prepare(`UPDATE projects
       SET status = ?, reference_image_path = ?, floor_material_image_path = ?, wall_material_image_path = ?, object_material_image_path = ?, object_mask_image_path = ?, result_after_path = ?, analysis_json = ?, updated_at = ?
       WHERE id = ?`)
       .run('completed', target.reference_image_path, target.floor_material_image_path, target.wall_material_image_path, target.object_material_image_path, target.object_mask_image_path, restoredAfterPath, JSON.stringify(rollbackAnalysis), now, project.id);
-    const version = createProjectVersion(db, {
+    const version = await createProjectVersion(db, {
       projectId: project.id,
       kind: 'rollback',
       parentVersionId: parentVersion?.id || baseline.id,
@@ -1043,7 +1088,7 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
       analysis: rollbackAnalysis,
       createdAt: now
     });
-    const updatedProject = ownedProject(db, project.id, user.id);
+    const updatedProject = await ownedProject(db, project.id, user.id);
     sendJson(res, 200, {
       data: {
         project: projectView(updatedProject),
@@ -1056,9 +1101,9 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
 
   const versionAnalyzeMatch = pathname.match(/^\/api\/v1\/projects\/([^/]+)\/versions\/analyze$/);
   if (versionAnalyzeMatch && method === 'POST') {
-    const user = requireUser(db, req, res);
+    const user = await requireUser(db, req, res);
     if (!user) return true;
-    const project = ownedProject(db, versionAnalyzeMatch[1], user.id);
+    const project = await ownedProject(db, versionAnalyzeMatch[1], user.id);
     if (!project) { sendError(res, 404, 'PROJECT_NOT_FOUND', '프로젝트를 찾을 수 없습니다.'); return true; }
     if (project.status === 'analyzing') { sendError(res, 409, 'PROJECT_ANALYZING', '분석이 완료된 뒤 새 버전을 만들 수 있습니다.'); return true; }
     const maximum = Math.max(1, Number(ENV.AI_ANALYZE_LIMIT_PER_HOUR) || 20);
@@ -1068,7 +1113,7 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
     }
     const body = await readJson(req);
     const materialMode = ['floorMaterialImage', 'wallMaterialImage', 'floorImage', 'wallImage'].some((key) => Object.hasOwn(body, key));
-    const current = readStoredImage(project.current_image_path);
+    const current = await readStoredImage(project.current_image_path, db);
     let reference = null;
     let floorMaterial = null;
     let wallMaterial = null;
@@ -1088,11 +1133,11 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
     }
     const uploadsDir = path.join(dataDir, 'uploads');
     const generatedDir = path.join(dataDir, 'generated');
-    const referencePath = reference ? writeImage(uploadsDir, reference) : null;
-    const floorMaterialPath = floorMaterial ? writeImage(uploadsDir, floorMaterial) : null;
-    const wallMaterialPath = wallMaterial ? writeImage(uploadsDir, wallMaterial) : null;
-    const baseline = ensureProjectVersionHistory(db, project);
-    const parentVersion = latestProjectVersion(db, project.id) || baseline;
+    const referencePath = reference ? await writeImage(uploadsDir, reference, db) : null;
+    const floorMaterialPath = floorMaterial ? await writeImage(uploadsDir, floorMaterial, db) : null;
+    const wallMaterialPath = wallMaterial ? await writeImage(uploadsDir, wallMaterial, db) : null;
+    const baseline = await ensureProjectVersionHistory(db, project);
+    const parentVersion = await latestProjectVersion(db, project.id) || baseline;
     try {
       const result = await aiProvider.analyze({ current, reference, floorMaterial, wallMaterial });
       if (!result || typeof result !== 'object') throw new Error('AI provider returned an invalid result');
@@ -1107,17 +1152,17 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
       if (result.after?.base64) {
         if (afterPath) throw new Error('AI provider returned conflicting after-image sources');
         const afterImage = decodeImage(`data:${result.after.mimeType || 'image/png'};base64,${result.after.base64}`);
-        afterPath = writeImage(generatedDir, afterImage);
+        afterPath = await writeImage(generatedDir, afterImage, db);
       }
       if (!afterPath) throw new Error('AI provider did not return an after image or an explicit source preview');
       const safeResult = { ...result };
       delete safeResult.after;
       const now = new Date().toISOString();
-      db.prepare(`UPDATE projects
+      await db.prepare(`UPDATE projects
         SET status = ?, reference_image_path = ?, floor_material_image_path = ?, wall_material_image_path = ?, object_material_image_path = NULL, object_mask_image_path = NULL, result_after_path = ?, analysis_json = ?, updated_at = ?
         WHERE id = ?`)
         .run('completed', referencePath, floorMaterialPath, wallMaterialPath, afterPath, JSON.stringify(safeResult), now, project.id);
-      const version = createProjectVersion(db, {
+      const version = await createProjectVersion(db, {
         projectId: project.id,
         kind: 'generation',
         parentVersionId: parentVersion.id,
@@ -1129,7 +1174,7 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
         analysis: safeResult,
         createdAt: now
       });
-      const updatedProject = ownedProject(db, project.id, user.id);
+      const updatedProject = await ownedProject(db, project.id, user.id);
       sendJson(res, 201, {
         data: {
           project: projectView(updatedProject),
@@ -1139,7 +1184,7 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
       });
     } catch (error) {
       const failedAnalysis = { message: '새 버전 분석을 완료하지 못했습니다.' };
-      createProjectVersion(db, {
+      await createProjectVersion(db, {
         projectId: project.id,
         kind: 'generation',
         status: 'failed',
@@ -1166,26 +1211,26 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
 
   const projectMatch = pathname.match(/^\/api\/v1\/projects\/([^/]+)$/);
   if (projectMatch && method === 'GET') {
-    const user = requireUser(db, req, res);
+    const user = await requireUser(db, req, res);
     if (!user) return true;
-    const project = ownedProject(db, projectMatch[1], user.id);
+    const project = await ownedProject(db, projectMatch[1], user.id);
     if (!project) { sendError(res, 404, 'PROJECT_NOT_FOUND', '프로젝트를 찾을 수 없습니다.'); return true; }
     sendJson(res, 200, { data: { project: projectView(project) } });
     return true;
   }
 
   if (projectMatch && method === 'DELETE') {
-    const user = requireUser(db, req, res);
+    const user = await requireUser(db, req, res);
     if (!user) return true;
-    const project = ownedProject(db, projectMatch[1], user.id);
+    const project = await ownedProject(db, projectMatch[1], user.id);
     if (!project) { sendError(res, 404, 'PROJECT_NOT_FOUND', '프로젝트를 찾을 수 없습니다.'); return true; }
     if (project.status === 'analyzing') {
       sendError(res, 409, 'PROJECT_ANALYZING', '분석이 완료된 뒤 삭제할 수 있습니다.');
       return true;
     }
 
-    const versionPaths = db.prepare('SELECT before_image_path, reference_image_path, floor_material_image_path, wall_material_image_path, object_material_image_path, object_mask_image_path, result_after_path, analysis_json FROM project_versions WHERE project_id = ?')
-      .all(project.id)
+    const versionPaths = (await db.prepare('SELECT before_image_path, reference_image_path, floor_material_image_path, wall_material_image_path, object_material_image_path, object_mask_image_path, result_after_path, analysis_json FROM project_versions WHERE project_id = ?')
+      .all(project.id))
       .flatMap((version) => [...versionMediaPaths(version), ...analysisMediaPaths(version.analysis_json)]);
     const mediaPaths = [
       project.current_image_path,
@@ -1198,28 +1243,28 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
       ...analysisMediaPaths(project.analysis_json),
       ...versionPaths
     ];
-    db.prepare('DELETE FROM projects WHERE id = ? AND user_id = ?').run(project.id, user.id);
-    removeUnreferencedProjectMedia(db, dataDir, mediaPaths);
+    await db.prepare('DELETE FROM projects WHERE id = ? AND user_id = ?').run(project.id, user.id);
+    await removeUnreferencedProjectMedia(db, dataDir, mediaPaths);
     sendJson(res, 200, { data: { id: project.id, deleted: true } });
     return true;
   }
 
   const saveMatch = pathname.match(/^\/api\/v1\/projects\/([^/]+)\/save$/);
   if (saveMatch && method === 'POST') {
-    const user = requireUser(db, req, res);
+    const user = await requireUser(db, req, res);
     if (!user) return true;
-    const project = ownedProject(db, saveMatch[1], user.id);
+    const project = await ownedProject(db, saveMatch[1], user.id);
     if (!project) { sendError(res, 404, 'PROJECT_NOT_FOUND', '프로젝트를 찾을 수 없습니다.'); return true; }
-    db.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').run('saved', new Date().toISOString(), project.id);
-    sendJson(res, 200, { data: { project: projectView(ownedProject(db, project.id, user.id)) } });
+    await db.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').run('saved', new Date().toISOString(), project.id);
+    sendJson(res, 200, { data: { project: projectView(await ownedProject(db, project.id, user.id)) } });
     return true;
   }
 
   const mediaMatch = pathname.match(/^\/api\/v1\/projects\/([^/]+)\/media\/(current|reference|floor|wall|object-material|mask|after)$/);
   if (mediaMatch && method === 'GET') {
-    const user = requireUser(db, req, res);
+    const user = await requireUser(db, req, res);
     if (!user) return true;
-    const project = ownedProject(db, mediaMatch[1], user.id);
+    const project = await ownedProject(db, mediaMatch[1], user.id);
     if (!project) { sendError(res, 404, 'PROJECT_NOT_FOUND', '프로젝트를 찾을 수 없습니다.'); return true; }
     const key = {
       current: 'current_image_path',
@@ -1231,6 +1276,21 @@ async function handleApi({ req, res, url, db, aiProvider, dataDir, analysisUsage
       after: 'result_after_path'
     }[mediaMatch[2]];
     const filename = project[key];
+    if (filename && db?.storage?.isManaged(filename)) {
+      const stored = await db.storage.read(filename);
+      if (!stored?.buffer) {
+        sendError(res, 404, 'IMAGE_NOT_FOUND', '?대?吏瑜?李얠쓣 ???놁뒿?덈떎.');
+        return true;
+      }
+      res.writeHead(200, {
+        ...securityHeaders(),
+        'content-type': stored.mimeType || 'application/octet-stream',
+        'content-length': stored.buffer.length,
+        'cache-control': 'private, max-age=60'
+      });
+      res.end(stored.buffer);
+      return true;
+    }
     if (!filename || filename.startsWith('/assets/') || !fs.existsSync(filename)) {
       sendError(res, 404, 'IMAGE_NOT_FOUND', '이미지를 찾을 수 없습니다.');
       return true;
@@ -1277,7 +1337,13 @@ export function createMoinServer(options = {}) {
   const dataDir = path.resolve(options.dataDir || path.join(ROOT, 'data'));
   const dbPath = path.resolve(options.dbPath || ENV.DB_PATH || path.join(dataDir, 'moin.sqlite'));
   const demoAuthEnabled = ENV.NODE_ENV !== 'production' || ENV.ENABLE_DEMO_AUTH === 'true';
-  const db = options.db || openDatabase(dbPath, { seedDemo: demoAuthEnabled });
+  const db = options.db || (hasSupabaseConfiguration(ENV)
+    ? openSupabaseDatabase({
+      url: ENV.SUPABASE_URL,
+      secretKey: ENV.SUPABASE_SECRET_KEY || ENV.SUPABASE_SERVICE_ROLE_KEY,
+      seedDemo: demoAuthEnabled
+    })
+    : openDatabase(dbPath, { seedDemo: demoAuthEnabled }));
   const aiProvider = options.aiProvider || createAiProvider(ENV);
   const analysisUsage = new Map();
   const server = http.createServer(async (req, res) => {
@@ -1338,6 +1404,6 @@ if (isMain) {
   const host = ENV.HOST || '127.0.0.1';
   server.listen(port, host, () => {
     console.log(`Moin is ready at http://${host}:${port}`);
-    console.log(`SQLite: ${server.moin.db ? 'connected' : 'unavailable'} | AI: ${server.moin.aiProvider.constructor.name}`);
+    console.log(`Database: ${server.moin.db?.provider || 'sqlite'} | AI: ${server.moin.aiProvider.constructor.name}`);
   });
 }

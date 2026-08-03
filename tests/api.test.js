@@ -618,3 +618,40 @@ test('production blocks both demo endpoint and known demo credentials', async ()
     fs.rmSync(prodRoot, { recursive: true, force: true });
   }
 });
+
+test('production demo login survives a different serverless instance', async () => {
+  const rootA = path.resolve('data', `prod-demo-a-${process.pid}-${Date.now()}`);
+  const rootB = path.resolve('data', `prod-demo-b-${process.pid}-${Date.now()}`);
+  fs.mkdirSync(rootA, { recursive: true });
+  fs.mkdirSync(rootB, { recursive: true });
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousDemoAuth = process.env.ENABLE_DEMO_AUTH;
+  const previousSessionSecret = process.env.MOIN_SESSION_SECRET;
+  process.env.NODE_ENV = 'production';
+  process.env.ENABLE_DEMO_AUTH = 'true';
+  process.env.MOIN_SESSION_SECRET = 'test-secret-that-is-at-least-thirty-two-characters';
+  const serverA = createMoinServer({ dbPath: path.join(rootA, 'moin.sqlite'), dataDir: rootA, aiProvider: immediateAi });
+  const serverB = createMoinServer({ dbPath: path.join(rootB, 'moin.sqlite'), dataDir: rootB, aiProvider: immediateAi });
+  await new Promise((resolve) => serverA.listen(0, '127.0.0.1', resolve));
+  await new Promise((resolve) => serverB.listen(0, '127.0.0.1', resolve));
+  try {
+    const login = await fetch(`http://127.0.0.1:${serverA.address().port}/api/v1/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'demo@moin.local', password: 'moin1234!' })
+    });
+    assert.equal(login.status, 200);
+    const signedCookie = login.headers.get('set-cookie').split(';')[0];
+    const me = await fetch(`http://127.0.0.1:${serverB.address().port}/api/v1/auth/me`, { headers: { cookie: signedCookie } });
+    assert.equal(me.status, 200);
+    assert.equal((await me.json()).data.user.email, 'demo@moin.local');
+  } finally {
+    await new Promise((resolve) => serverA.close(resolve));
+    await new Promise((resolve) => serverB.close(resolve));
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = previousNodeEnv;
+    if (previousDemoAuth === undefined) delete process.env.ENABLE_DEMO_AUTH; else process.env.ENABLE_DEMO_AUTH = previousDemoAuth;
+    if (previousSessionSecret === undefined) delete process.env.MOIN_SESSION_SECRET; else process.env.MOIN_SESSION_SECRET = previousSessionSecret;
+    fs.rmSync(rootA, { recursive: true, force: true });
+    fs.rmSync(rootB, { recursive: true, force: true });
+  }
+});
